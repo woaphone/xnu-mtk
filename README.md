@@ -1,3 +1,67 @@
+# xnu-mtk
+
+Apple XNU 内核在 MediaTek 平台上的离线移植。
+
+基于 **`xnu-10063.141.1`**（Darwin 23.6.0，上游提交
+[`d8b80295`](https://github.com/apple-oss-distributions/xnu/commit/d8b80295118ef25ac3a784134bcf95cd8e88109f)）。
+
+## 分支
+
+| 分支 | 内容 | 设备 |
+| --- | --- | --- |
+| `main` | Apple 原版快照，未改动 | — |
+| `yunluo` | 板级移植 | Redmi Pad（MT6789） |
+| `rothko` | 板级移植，进行中 | Redmi K70 Ultra（MT6989） |
+
+`main` 是干净的 diff 基准，两个设备分支都从它派生：
+
+```bash
+git diff main..yunluo     # 看 MT6789 移植到底改了什么
+```
+
+## 仓库边界
+
+**有**：XNU 内核侧的板级改动（161 文件 / +14653 −341）。
+
+**没有**：UFS、显示、输入驱动 —— 它们在 UniXNU 侧的 `drivers/` 里，
+以 archive 形式在链接时用 `-force_load` 并入内核。
+
+所以单靠本仓库编不出可启动的内核，需要配套的 UniXNU 树。
+
+## 编译
+
+XNU 官方只支持 macOS，但在 Linux 上可以编 —— 需要一整套 BSD 工具替身
+（`sysctl` / `sw_vers` / `xcrun` / `ditto`）和假 macOS SDK。
+这套流程打包成了 skill `xnu-linux-build`。
+
+三个前提：
+
+1. **先编驱动 archive，再编内核** —— 内核源码引用了驱动符号（如 `yunluo_panic_flush`），反过来驱动也读内核导出的 `yunluo_preboot_status`，两边 `-D` 宏必须成对
+2. **`XNU_SKIP_PATCH_LOOP=1`** —— 所有改动都是手改源码，补丁循环已废弃（多个补丁改同一批文件，正反向 check 同时失败）
+3. 验收看 `file <kernel>` 里有没有 **`NOUNDEFS`**，没有就是链接没干净
+
+## 移植差异（MT6789 → MT6989）
+
+| 项 | MT6789 | MT6989 |
+| --- | --- | --- |
+| UFSHCI 基址 | `0x11270000` | `0x112b0000` |
+| UFSHCI 窗口 | `0x2300` | `0x2a00` |
+| UFS 版本 | 2.2（HS-G2） | 4.0（HS-G4/G5） |
+| UFS PHY | — | `0x112a0000`，`mphy-ver=1` |
+| `/psci method` | SMC | SMC |
+| LK DT 里的 CPU | 多核 | 只有 `/cpu@0` |
+| GIC 节点名 | — | `interrupt-controller@c400000`（不叫 `gic`） |
+
+改动细节见 `rothko` 分支的提交说明。
+
+## License
+
+XNU 本体为 Apple Public Source License 2.0，见 [`APPLE_LICENSE`](./APPLE_LICENSE)。
+
+---
+
+以下为从上游原样导入的 README。
+
 # What is XNU?
 
 XNU kernel is part of the Darwin operating system for use in macOS and iOS operating systems. XNU is an acronym for X is Not Unix.
