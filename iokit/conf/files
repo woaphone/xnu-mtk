@@ -9,25 +9,11 @@ OPTIONS/config_dtrace				optional config_dtrace
 OPTIONS/mach_assert				optional mach_assert
 
 # iig generated implementation files
-
-./DriverKit/OSObject.iig.cpp		optional iokitcpp
-./DriverKit/OSAction.iig.cpp		optional iokitcpp
-./DriverKit/IOService.iig.cpp		optional iokitcpp
-./DriverKit/IOExtensiblePaniclog.iig.cpp    optional iokitcpp
-./DriverKit/IOUserClient.iig.cpp		optional iokitcpp
-./DriverKit/IOMemoryDescriptor.iig.cpp		optional iokitcpp
-./DriverKit/IOBufferMemoryDescriptor.iig.cpp		optional iokitcpp
-./DriverKit/IOMemoryMap.iig.cpp		optional iokitcpp
-./DriverKit/IODispatchSource.iig.cpp		optional iokitcpp
-./DriverKit/IODispatchQueue.iig.cpp		optional iokitcpp
-./DriverKit/IOInterruptDispatchSource.iig.cpp		optional iokitcpp
-./DriverKit/IODataQueueDispatchSource.iig.cpp		optional iokitcpp
-./DriverKit/IOServiceNotificationDispatchSource.iig.cpp		optional iokitcpp
-./DriverKit/IOServiceStateNotificationDispatchSource.iig.cpp		optional iokitcpp
-./DriverKit/IOEventLink.iig.cpp		optional iokitcpp
-./DriverKit/IOWorkGroup.iig.cpp		optional iokitcpp
-./DriverKit/IOUserServer.iig.cpp		optional iokitcpp
-./DriverKit/IODMACommand.iig.cpp		optional iokitcpp
+#
+# IIG is part of Xcode and is not available to the Linux porting build. These
+# files implement the DriverKit kernel-side stubs for extension drivers; the
+# core kernel and the first-boot console do not use them, so they are omitted.
+# (The corresponding generated headers are outside the kernel target as well.)
 
 # libIOKit
 
@@ -100,15 +86,18 @@ iokit/Kernel/IODataQueue.cpp				optional iokitcpp
 iokit/Kernel/IOSharedDataQueue.cpp			optional iokitcpp
 
 # IOKit tests
-iokit/Tests/Tests.cpp					optional iokitcpp
-iokit/Tests/TestIOMemoryDescriptor.cpp      optional iokitcpp
+#
+# The tests exercise DriverKit APIs that postdate the SDK's IIG output and are
+# not part of a bootable kernel; omit them from the Linux porting build.
+#iokit/Tests/Tests.cpp					optional iokitcpp
+#iokit/Tests/TestIOMemoryDescriptor.cpp      optional iokitcpp
 # iokit/Tests/TestDevice.cpp                optional iokitcpp
 # iokit/Tests/TestContainers.cpp            optional iokitcpp
 # iokit/Tests/TestCollections.cpp           optional iokitcpp
-iokit/Tests/TestServices/TestIOConnectMapMemoryPortLeak45265408.cpp optional iokitcpp
-iokit/Tests/TestServices/TestIODeviceMemoryRosetta.cpp optional iokitcpp
-iokit/Tests/TestServices/TestIOUserClient2022Entitlements.cpp optional iokitcpp
-iokit/Tests/TestServices/TestIOServiceUserNotification.cpp optional iokitcpp
+#iokit/Tests/TestServices/TestIOConnectMapMemoryPortLeak45265408.cpp optional iokitcpp
+#iokit/Tests/TestServices/TestIODeviceMemoryRosetta.cpp optional iokitcpp
+#iokit/Tests/TestServices/TestIOUserClient2022Entitlements.cpp optional iokitcpp
+#iokit/Tests/TestServices/TestIOServiceUserNotification.cpp optional iokitcpp
 
 iokit/Kernel/IOStatistics.cpp				optional iokitcpp
 iokit/Kernel/IOInterruptAccounting.cpp			optional iokitcpp
@@ -123,7 +112,11 @@ iokit/Kernel/IORTC.cpp				optional iokitcpp
 
 iokit/Kernel/IOStringFuncs.c				standard
 
-iokit/Kernel/IOUserServer.cpp				optional iokitcpp
+# Linux port: IOUserServer.cpp needs the IIG-generated DriverKit interfaces.
+# The first-boot kernel does not launch DriverKit extensions; the static entry
+# points core IOKit calls are provided by linux-no-driverkit-server.cpp.
+#iokit/Kernel/IOUserServer.cpp				optional iokitcpp
+iokit/Kernel/linux-no-driverkit-server.cpp		optional iokitcpp
 
 # Property tables for kernel-linked objects
 

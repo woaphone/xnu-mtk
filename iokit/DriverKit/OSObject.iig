@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -259,16 +263,16 @@ typedef char IODispatchQueueName[256];
 class OSMetaClassBase
 {
 	virtual const OSMetaClass *
-	getMetaClass() const LOCALONLY;
+	getMetaClass() const ;
 
     virtual void
-    retain() const LOCALONLY;
+    retain() const ;
 
     virtual void
-    release() const LOCALONLY;
+    release() const ;
 
 	virtual bool
-    isEqualTo(const OSMetaClassBase * anObject) const LOCALONLY;
+    isEqualTo(const OSMetaClassBase * anObject) const ;
 };
 #endif /* __IIG */
 
@@ -284,10 +288,10 @@ class OSObject : public OSMetaClassBase
 public:
 
 	virtual bool
-	init() LOCALONLY;
+	init() ;
 
 	virtual void
-	free() LOCALONLY;
+	free() ;
 
     virtual void
     retain() const override;
@@ -298,12 +302,12 @@ public:
 	virtual kern_return_t
 	SetDispatchQueue(
 		const IODispatchQueueName name,
-		IODispatchQueue         * queue) KERNEL = 0;
+		IODispatchQueue         * queue) = 0;
 
 	virtual kern_return_t
 	CopyDispatchQueue(
 		const IODispatchQueueName name,
-		IODispatchQueue        ** queue) KERNEL = 0;
+		IODispatchQueue        ** queue) = 0;
 };
 
 #define DEFN(classname, name)                                       \

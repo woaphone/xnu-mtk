@@ -979,6 +979,9 @@ DebuggerXCallEnter(
 	int max_cpu;
 	cpu_data_t      *target_cpu_datap;
 	cpu_data_t      *cpu_data_ptr = getCpuDatap();
+#if defined(BCM2837)
+	unsigned int failed_debug_cpu_signals = 0;
+#endif
 
 	/* Check for nested debugger entry. */
 	cpu_data_ptr->debugger_active++;
@@ -1020,6 +1023,9 @@ DebuggerXCallEnter(
 			}
 
 			kern_return_t ret = cpu_signal(target_cpu_datap, SIGPdebug, (void *)NULL, NULL);
+#if defined(BCM2837)
+			if (ret != KERN_SUCCESS) { failed_debug_cpu_signals++; }
+#endif
 			if (ret == KERN_SUCCESS) {
 				os_atomic_inc(&debugger_sync, relaxed);
 				os_atomic_inc(&debug_cpus_spinning, relaxed);
@@ -1047,6 +1053,17 @@ DebuggerXCallEnter(
 			current_mabs_time = mach_absolute_time();
 		}
 	}
+
+#if defined(BCM2837)
+	/* A live native CPU may reject SIGPdebug while IPIs are unavailable.
+	 * Do not enter KDP for a nonfatal snapshot without stopping every target. */
+	if (is_stackshot && (failed_debug_cpu_signals != 0 || debugger_sync != 0)) {
+		kprintf("YUNLUO-KDP reject stackshot failed=%u pending=%u\n",
+		    failed_debug_cpu_signals, debugger_sync);
+		DebuggerXCallReturn();
+		return KERN_OPERATION_TIMED_OUT;
+	}
+#endif
 
 	if (!proceed_on_sync_failure && (max_mabs_time > 0 && current_mabs_time >= max_mabs_time)) {
 		__builtin_arm_dmb(DMB_ISH);

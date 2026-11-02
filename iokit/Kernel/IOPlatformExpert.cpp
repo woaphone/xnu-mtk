@@ -52,6 +52,7 @@
 #include <libkern/c++/OSSharedPtr.h>
 #include <libkern/crypto/sha1.h>
 #include <libkern/OSAtomic.h>
+#include "../../osfmk/kern/yunluo_diag.h"
 
 #if defined(__arm64__)
 #include <arm64/tlb.h>
@@ -2343,13 +2344,37 @@ bool
 IOPanicPlatform::start(IOService * provider)
 {
 	const char * platform_name = "(unknown platform name)";
+	void * bt[YUNLUO_BT_MAX];
+	char message[224];
 
 	if (provider) {
 		platform_name = provider->getName();
 	}
 
-	panic("Unable to find driver for this platform: \"%s\".",
-	    platform_name);
+	/*
+	 * Yunluo bring-up: no real platform expert matched.  Fold the root nub
+	 * identity, ArmDTPlatform's last completed bring-up step and the caller
+	 * chain into the panic text itself, because the panic screen replaces the
+	 * console and the earlier kprintf history is lost.
+	 */
+	{
+		OSData * nameProp = OSDynamicCast(OSData, provider ? provider->getProperty("name") : NULL);
+		OSData * model = OSDynamicCast(OSData, provider ? provider->getProperty("model") : NULL);
+		OSData * compat = OSDynamicCast(OSData, provider ? provider->getProperty("compatible") : NULL);
+		OSNumber * stageNum = OSDynamicCast(OSNumber, provider ? provider->getProperty("yunluo-armdt-stage") : NULL);
+		const char * nameStr = nameProp ? (const char *)nameProp->getBytesNoCopy() : "(none)";
+		const char * modelStr = model ? (const char *)model->getBytesNoCopy() : "(none)";
+		const char * compatStr = compat ? (const char *)compat->getBytesNoCopy() : "(none)";
+		unsigned stage = stageNum ? stageNum->unsigned32BitValue() : 0;
+		yunluo_bt_collect(bt, YUNLUO_BT_MAX);
+		kprintf("YUNLUO-PLAT: nomatch name=%s propname=%.24s model=%.48s compat=%.96s stage=%u\n",
+		    platform_name, nameStr, modelStr, compatStr, stage);
+		snprintf(message, sizeof(message),
+		    "Unable to find driver for this platform: \"%s\" name=%.16s model=%.24s compat=%.40s stage=%u bt=%p,%p,%p",
+		    platform_name, nameStr, modelStr, compatStr, stage, bt[0], bt[1], bt[2]);
+	}
+
+	panic("%s", message);
 
 	return false;
 }

@@ -68,6 +68,9 @@
 
 #include <machine/pal_routines.h>
 
+/* Reusable caller-chain diagnostics for the yunluo bring-up. */
+#include "../../osfmk/kern/yunluo_diag.h"
+
 #define LOG kprintf
 //#define LOG IOLog
 #define MATCH_DEBUG     0
@@ -1146,7 +1149,9 @@ IOService::startMatching( IOOptionBits options )
 		} else if (!sync || (kIOServiceAsynchronous & options)) {
 			// assertion will be released when matching job is complete
 			releaseAssertion = false;
-			_IOServiceJob::startJob( this, kMatchNubJob, options );
+			if (!_IOServiceJob::startJob( this, kMatchNubJob, options )) {
+				kprintf("YUNLUO: %s match job fail\n", getName());
+			}
 		} else {
 			do {
 				if ((__state[1] & kIOServiceNeedConfigState)) {
@@ -1933,7 +1938,30 @@ IOService::unlockForArbitration( void )
 		}
 	}
 
-	assert( found );
+	if (!found) {
+		/* Non-Apple platforms: AppleARMBootPerf unlocks without locking.
+		 * No queue element exists, so only the global queue lock is held.
+		 * Report the first occurrence (class plus caller chain) once. */
+		static bool yunluoUnlockWarned = false;
+		bool yunluoLog = !yunluoUnlockWarned;
+		const char *yunluoClassName = NULL;
+
+		if (yunluoLog) {
+			yunluoClassName = getMetaClass()->getClassName();
+		}
+		yunluoUnlockWarned = true;
+		/* Release the global queue lock before console output. */
+		IOUnlock( gArbitrationLockQueueLock );
+
+		if (yunluoLog) {
+			YUNLUO_BT_DECLARE(yunluoBt);
+
+			kprintf("YUNLUO: %s unlock-nolock " YUNLUO_BT_FMT "\n",
+			    yunluoClassName,
+			    YUNLUO_BT_ARGS(yunluoBt));
+		}
+		return;
+	}
 
 	// determine whether the lock has been taken recursively
 	if (element->count > 1) {
@@ -4202,6 +4230,12 @@ IOService::probeCandidates( OSOrderedSet * matches )
 						 * concurrently, then the matching process has to restart
 						 */
 						started = startCandidate( inst );
+						if (!started &&
+						    !inst->propertyExists(gIOServiceMatchDeferredKey)) {
+							kprintf("YUNLUO: %s start fail prov=%s\n",
+							    inst->getMetaClass()->getClassName(),
+							    getMetaClass()->getClassName());
+						}
 #if IOMATCHDEBUG
 						if ((debugFlags & kIOLogStart) && (false == started)) {
 							LOG( "%s::start(%s) <%d> failed\n", inst->getName(), getName(),
@@ -5257,14 +5291,16 @@ IOService::setRootMedia(IOService * root)
 	const OSMetaClass * ioblockstoragedriverClass;
 	bool unhide;
 
-	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
-	assert(ioblockstoragedriverClass);
+	if (root) {
+		ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
+		assert(ioblockstoragedriverClass);
 
-	while (root) {
-		if (root->metaCast(ioblockstoragedriverClass)) {
-			break;
+		while (root) {
+			if (root->metaCast(ioblockstoragedriverClass)) {
+				break;
+			}
+			root = root->getProvider();
 		}
-		root = root->getProvider();
 	}
 
 	LOCKWRITENOTIFY();
@@ -5325,6 +5361,9 @@ IOService::doServiceMatch( IOOptionBits options )
 	while (keepGuessing) {
 		matches = gIOCatalogue->findDrivers( this, &catalogGeneration );
 		// the matches list should always be created by findDrivers()
+		if (!matches) {
+			kprintf("YUNLUO: %s findDrivers null\n", getName());
+		}
 		if (matches) {
 			lockForArbitration();
 			if (0 == (__state[0] & kIOServiceFirstPublishState)) {
@@ -5349,8 +5388,16 @@ IOService::doServiceMatch( IOOptionBits options )
 
 			keepGuessing &= (0 == (__state[0] & kIOServiceInactiveState));
 			if (reRegistered && keepGuessing) {
+				OSObject *publishSet =
+				    gNotifications->getObject( gIOPublishNotification );
+				if (publishSet &&
+				    ((uintptr_t)publishSet < 0xffff000000000000ULL)) {
+					kprintf("YUNLUO: %s bad publish set %p\n",
+					    getName(), publishSet);
+					publishSet = NULL;
+				}
 				iter = OSCollectionIterator::withCollection((OSOrderedSet *)
-				    gNotifications->getObject( gIOPublishNotification ));
+				    publishSet);
 				if (iter) {
 					while ((notify = (_IOServiceNotifier *)
 					    iter->getNextObject())) {
@@ -5366,14 +5413,21 @@ IOService::doServiceMatch( IOOptionBits options )
 			UNLOCKNOTIFY();
 			unlockForArbitration();
 			invokeNotifiers(&notifiers[0]);
-			if (keepGuessing && matches->getCount() && (kIOReturnSuccess == getResources())) {
-				if ((this == gIOResources) || (this == gIOUserResources)) {
-					if (resourceKeys) {
-						resourceKeys->release();
+			if (keepGuessing && matches->getCount()) {
+				IOReturn res = getResources();
+
+				if (kIOReturnSuccess == res) {
+					if ((this == gIOResources) || (this == gIOUserResources)) {
+						if (resourceKeys) {
+							resourceKeys->release();
+						}
+						resourceKeys = copyPropertyKeys();
 					}
-					resourceKeys = copyPropertyKeys();
+					probeCandidates( matches );
+				} else {
+					kprintf("YUNLUO: %s nores 0x%x\n", getName(), res);
+					matches->release();
 				}
-				probeCandidates( matches );
 			} else {
 				matches->release();
 			}
@@ -7507,6 +7561,15 @@ IOService::compareProperties( OSDictionary * matching,
 	bool                        ok = true;
 
 	if (!matching || !keys) {
+		return false;
+	}
+
+	if ((uintptr_t)keys < 0xffff000000000000ULL) {
+		void *bt[YUNLUO_BT_MAX];
+		yunluo_bt_collect(bt, YUNLUO_BT_MAX);
+		kprintf("YUNLUO: compareProperties bad keys %p "
+		    YUNLUO_BT_FMT "\n", keys, bt[0], bt[1], bt[2], bt[3],
+		    bt[4], bt[5], bt[6], bt[7]);
 		return false;
 	}
 

@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -60,7 +64,7 @@ enum {
  * the primary interrupt fired. For IOPCIDevices, only MSI interrupt sources are supported.
  */
  
-class NATIVE KERNEL IOInterruptDispatchSource : public IODispatchSource
+class IOInterruptDispatchSource : public IODispatchSource
 {
 public:
 
@@ -77,7 +81,7 @@ public:
 	Create(IOService * provider,
 	    uint32_t index,
 	    IODispatchQueue * queue,
-	    IOInterruptDispatchSource ** source) LOCAL;
+	    IOInterruptDispatchSource ** source) ;
 
     /*!
      * @brief       Returns the type of interrupt used for a device supplying hardware interrupts, by index from an IOService provider.
@@ -109,7 +113,7 @@ public:
      */
 	virtual kern_return_t
 	    SetHandler(
-		OSAction * action TYPE(InterruptOccurred)) LOCAL;
+		OSAction * action ) ;
 
     /*!
      * @brief       Control the enable state of the interrupt source.
@@ -121,7 +125,7 @@ public:
 	virtual kern_return_t
 	SetEnableWithCompletion(
 		bool enable,
-		IODispatchSourceCancelHandler handler) override LOCAL;
+		IODispatchSourceCancelHandler handler) override ;
 
     /*!
      * @brief       Cancel all callbacks from the event source.
@@ -130,7 +134,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	virtual kern_return_t
-	Cancel(IODispatchSourceCancelHandler handler) override LOCAL;
+	Cancel(IODispatchSourceCancelHandler handler) override ;
 
     /*!
      * @brief       Get the count and time of the last interrupt received by the kernel
@@ -146,13 +150,13 @@ public:
 
 private:
 	virtual kern_return_t
-	CheckForWork(bool synchronous) override LOCAL;
+	CheckForWork(bool synchronous) override ;
 
 	virtual void
 	InterruptOccurred(
-		OSAction * action TARGET,
+		OSAction * action ,
 		uint64_t   count,
-		uint64_t   time) REPLY LOCAL;
+		uint64_t   time) ;
 };
 
 #endif /* ! _IOKIT_UIOINTERRUPTDISPATCHSOURCE_H */

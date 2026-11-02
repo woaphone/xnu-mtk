@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -87,7 +91,7 @@ enum {
 @iig end
 */
 
-class KERNEL IOService : public OSObject
+class IOService : public OSObject
 {
 public:
 	virtual bool
@@ -106,7 +110,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	virtual kern_return_t
-	Start(IOService * provider) LOCAL;
+	Start(IOService * provider) ;
 
     /*!
      * @brief       Terminate access to provider.
@@ -117,7 +121,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	virtual kern_return_t
-	Stop(IOService * provider) LOCAL;
+	Stop(IOService * provider) ;
 
 	/*! @function   ClientCrashed
 	 * @discussion  Notification for kernel objects of a client crash.
@@ -134,7 +138,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	virtual kern_return_t
-	GetRegistryEntryID(uint64_t * registryEntryID) LOCAL;
+	GetRegistryEntryID(uint64_t * registryEntryID) ;
 
     /*!
      * @brief       Set the IORegistryEntry name.
@@ -155,7 +159,7 @@ public:
     /*!
      * @brief       Set the IODispatchQueue for a given name on the IOService.
      * @param       name Name for the queue. The name may be referenced by methods in the .iig class definition
-     *              with the QUEUENAME() attribute to indicate the method must be invoked on that queue. If a method
+     *              with the attribute to indicate the method must be invoked on that queue. If a method
      *              is invoked before the queue is set for the name, the default queue is used. A default queue is
      *              created by DriverKit for every new IOService object with the name kIOServiceDefaultQueueName.
      * @param       queue Queue to be associated with the name on this IOService.
@@ -164,7 +168,7 @@ public:
 	virtual kern_return_t
 	SetDispatchQueue(
 		const IODispatchQueueName name,
-		IODispatchQueue         * queue) override LOCAL;
+		IODispatchQueue         * queue) override ;
 
     /*!
      * @brief       Obtain the IODispatchQueue for a given name on the IOService.
@@ -185,7 +189,7 @@ public:
      */
 	virtual kern_return_t
 	CreateDefaultDispatchQueue(
-		IODispatchQueue        ** queue) LOCAL;
+		IODispatchQueue        ** queue) ;
 
     /*!
      * @brief       Obtain the IOKit registry properties for the IOService.
@@ -244,7 +248,7 @@ public:
      */
 	virtual kern_return_t
 	SetPowerState(
-		uint32_t powerFlags) LOCAL;
+		uint32_t powerFlags) ;
 
     /*!
      * @brief       Allow provider to enter a low power state.
@@ -287,7 +291,7 @@ public:
 	Create(
 		IOService          * provider,
 		const IOPropertyName propertiesKey,
-		IOService         ** result) LOCAL;
+		IOService         ** result) ;
 
     /*!
      * @brief       Start an IOService termination.
@@ -373,49 +377,49 @@ public:
 	 *   @abstract Construct a matching dictionary for property matching.
 	 */
 	static OSDictionary *
-	CreatePropertyMatchingDictionary(const char * key, OSObjectPtr value, OSDictionary * matching) LOCALONLY;
+	CreatePropertyMatchingDictionary(const char * key, OSObjectPtr value, OSDictionary * matching) ;
 
 	/*! @function IOCreatePropertyMatchingDictionary
 	 *   @abstract Construct a matching dictionary for property matching.
 	 */
 	static OSDictionary *
-	CreatePropertyMatchingDictionary(const char * key, const char * stringValue, OSDictionary * matching) LOCALONLY;
+	CreatePropertyMatchingDictionary(const char * key, const char * stringValue, OSDictionary * matching) ;
 
 	/*! @function IOCreateKernelClassMatchingDictionary
 	 *   @abstract Construct a matching dictionary for kernel class matching.
 	 */
 	static OSDictionary *
-	CreateKernelClassMatchingDictionary(OSString * className, OSDictionary * matching) LOCALONLY;
+	CreateKernelClassMatchingDictionary(OSString * className, OSDictionary * matching) ;
 
 	/*! @function IOCreateKernelClassMatchingDictionary
 	 *   @abstract Construct a matching dictionary for kernel class matching.
 	 */
 	static OSDictionary *
-	CreateKernelClassMatchingDictionary(const char * className, OSDictionary * matching) LOCALONLY;
+	CreateKernelClassMatchingDictionary(const char * className, OSDictionary * matching) ;
 
 	/*! @function IOCreateUserClassMatchingDictionary
 	 *   @abstract Construct a matching dictionary for user class matching.
 	 */
 	static OSDictionary *
-	CreateUserClassMatchingDictionary(OSString * className, OSDictionary * matching) LOCALONLY;
+	CreateUserClassMatchingDictionary(OSString * className, OSDictionary * matching) ;
 
 	/*! @function IOCreateUserClassMatchingDictionary
 	 *   @abstract Construct a matching dictionary for user class matching.
 	 */
 	static OSDictionary *
-	CreateUserClassMatchingDictionary(const char * className, OSDictionary * matching) LOCALONLY;
+	CreateUserClassMatchingDictionary(const char * className, OSDictionary * matching) ;
 
 	/*! @function IOCreateNameMatchingDictionary
 	 *   @abstract Construct a matching dictionary for IOService name matching.
 	 */
 	static OSDictionary *
-	CreateNameMatchingDictionary(OSString * serviceName, OSDictionary * matching) LOCALONLY;
+	CreateNameMatchingDictionary(OSString * serviceName, OSDictionary * matching) ;
 
 	/*! @function IOCreateNameMatchingDictionary
 	 *   @abstract Construct a matching dictionary for IOService name matching.
 	 */
 	static OSDictionary *
-	CreateNameMatchingDictionary(const char * serviceName, OSDictionary * matching) LOCALONLY;
+	CreateNameMatchingDictionary(const char * serviceName, OSDictionary * matching) ;
 
 	/*! @function UpdateReport
 	 *  @abstract update an IOReporting subscription by reading out channel data.
@@ -469,7 +473,7 @@ public:
 	 * @return     kIOReturnSuccess on success. See IOReturn.h for error codes.
 	 */
 	virtual kern_return_t
-	UserSetProperties(OSContainer * properties) LOCAL;
+	UserSetProperties(OSContainer * properties) ;
 
     /*!
      * @brief       Send the kIOMessageServicePropertyChange message
@@ -480,7 +484,7 @@ public:
 
 	const char *
 	StringFromReturn(
-		 IOReturn    retval) LOCALONLY;
+		 IOReturn    retval) ;
 #endif /* PRIVATE_WIFI_ONLY */
 
 	/*! @function RemoveProperty
@@ -496,7 +500,7 @@ public:
 	 *               This method returns the cached object.
 	 */
 	IOService *
-	GetProvider() const LOCALONLY;
+	GetProvider() const ;
 
    /*!
     * @function CopySystemStateNotificationService
@@ -542,13 +546,13 @@ public:
 private:
 	virtual void
 	Stop_async(
-		IOService          * provider) LOCAL;
+		IOService          * provider) ;
 
 	virtual kern_return_t
 	_NewUserClient(
 		uint32_t type,
 		OSDictionary *  entitlements,
-		IOUserClient ** userClient) LOCAL;
+		IOUserClient ** userClient) ;
 };
 
 #endif /* ! _IOKIT_UIOSERVICE_H */

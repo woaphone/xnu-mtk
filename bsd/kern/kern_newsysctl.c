@@ -1585,6 +1585,40 @@ can_write_experiment_factors(__unused struct sysctl_req *req)
 }
 
 /*
+ * yunluo: pid 1 sysctl trace ring (kind 0=entry 1=oid 2=handler 3=error).
+ */
+#define YUNLUO_SYSCTL_SLOTS 16
+volatile uint32_t yunluo_sysctl_idx;
+volatile int32_t  yunluo_sysctl_kind[YUNLUO_SYSCTL_SLOTS];
+volatile int32_t  yunluo_sysctl_n[YUNLUO_SYSCTL_SLOTS][4];
+volatile uint32_t yunluo_sysctl_len[YUNLUO_SYSCTL_SLOTS];
+volatile int32_t  yunluo_sysctl_error[YUNLUO_SYSCTL_SLOTS];
+volatile char     yunluo_sysctl_path[YUNLUO_SYSCTL_SLOTS][48];
+
+static void
+yunluo_sysctl_log(int kind, const char *path, const int *name, unsigned namelen, int error)
+{
+	uint32_t slot = yunluo_sysctl_idx % YUNLUO_SYSCTL_SLOTS;
+	int i = 0;
+
+	yunluo_sysctl_kind[slot] = kind;
+	for (i = 0; i < 4; i++) {
+		yunluo_sysctl_n[slot][i] = (name && i < (int)namelen) ? name[i] : 0;
+	}
+	yunluo_sysctl_len[slot] = namelen;
+	yunluo_sysctl_error[slot] = error;
+	for (i = 0; i < 47; i++) {
+		char c = (path && path[i]) ? path[i] : 0;
+		yunluo_sysctl_path[slot][i] = c;
+		if (c == 0) {
+			break;
+		}
+	}
+	yunluo_sysctl_path[slot][47] = 0;
+	yunluo_sysctl_idx++;
+}
+
+/*
  * Traverse our tree, and find the right node, execute whatever it points
  * at, and return the resulting error code.
  */
@@ -1706,6 +1740,22 @@ found:
 		}
 	}
 
+	/*
+	 * yunluo: security.mac.img4.ignition_blob is served by an AppleImage4
+	 * handler that never returns here (it waits for an ignition blob only
+	 * iBoot provides; our boot chain has none). launchd asks for it before
+	 * anything else and then hangs forever. Report it as absent instead.
+	 */
+	if (!from_kernel && namestring &&
+	    strcmp(namestring, "security.mac.img4.ignition_blob") == 0) {
+		yunluo_sysctl_log(4, namestring, name, (unsigned int)namelen, ENOENT);
+		if (req->p && proc_pid(req->p) == 1) {
+			kprintf("yunluo sysctl skip img4 ignition blob (ENOENT)\n");
+		}
+		error = ENOENT;
+		goto err;
+	}
+
 	/* If writing isn't allowed */
 	if (req->newptr && (!(oid->oid_kind & CTLFLAG_WR) ||
 	    ((oid->oid_kind & CTLFLAG_SECURE) && securelevel > 0))) {
@@ -1767,6 +1817,10 @@ found:
 		OSAddAtomic(1, &oid->oid_refcnt);
 	}
 
+	if (!from_kernel && req->p && proc_pid(req->p) == 1) {
+		yunluo_sysctl_log(1, namestring, name, (unsigned int)namelen, 0);
+	}
+
 	lck_rw_done(&sysctl_geometry_lock);
 
 #if CONFIG_MACF
@@ -1812,6 +1866,10 @@ found:
 	}
 	error = i;
 
+	if (!from_kernel && req->p && proc_pid(req->p) == 1) {
+		yunluo_sysctl_log(2, namestring, name, (unsigned int)namelen, error);
+	}
+
 	if (unlocked_node_found) {
 		lck_mtx_unlock(&sysctl_unlocked_node_lock);
 	}
@@ -1844,6 +1902,9 @@ dropref:
 	}
 
 err:
+	if (!from_kernel) {
+		yunluo_sysctl_log(3, namestring, name, (unsigned int)namelen, error);
+	}
 	lck_rw_done(&sysctl_geometry_lock);
 	return error;
 }
@@ -1876,7 +1937,7 @@ sysctl(proc_t p, struct sysctl_args *uap, __unused int32_t *retval)
 {
 	int error, new_error;
 	size_t oldlen = 0, newlen;
-	int name[CTL_MAXNAME];
+	int name[CTL_MAXNAME] = { 0 };
 	struct sysctl_req req;
 	char *namestring;
 	size_t namestringlen = MAXPATHLEN;
@@ -1910,6 +1971,10 @@ sysctl(proc_t p, struct sysctl_args *uap, __unused int32_t *retval)
 		} else {
 			oldlen = (size_t)oldlen64;
 		}
+	}
+
+	if (proc_pid(p) == 1) {
+		yunluo_sysctl_log(0, "", name, (unsigned int)uap->namelen, 0);
 	}
 
 	sysctl_create_user_req(&req, p, uap->old, oldlen, uap->new, newlen);

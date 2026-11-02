@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -92,7 +96,7 @@ struct _IOMDPrivateState {
 @iig end
 */
 
-class KERNEL IOMemoryDescriptor : public OSObject
+class IOMemoryDescriptor : public OSObject
 {
 public:
 
@@ -110,7 +114,7 @@ public:
      */
 	kern_return_t
 	GetLength(
-		uint64_t * returnLength) LOCALONLY;
+		uint64_t * returnLength) ;
 
     /*!
      * @brief       Create a mapping of the memory in the callers address space.
@@ -188,10 +192,10 @@ private:
 		uint64_t alignment,
 
 		uint64_t * returnAddress,
-		uint64_t * returnLength) LOCALONLY;
+		uint64_t * returnLength) ;
 };
 
-class EXTENDS (IOMemoryDescriptor) IOMemoryDescriptorPrivate
+class IOMemoryDescriptorPrivate
 {
 	virtual kern_return_t
 	_CopyState(

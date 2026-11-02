@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2020 Apple Inc. All rights reserved.
  *
@@ -87,7 +91,7 @@ struct IODMACommandSpecification {
  *
 */
 
-class KERNEL IODMACommand : public OSObject
+class IODMACommand : public OSObject
 {
 public:
 

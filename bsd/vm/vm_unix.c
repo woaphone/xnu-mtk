@@ -2225,6 +2225,100 @@ static void shared_region_map_and_slide_cleanup(
 	struct _sr_file_mappings *sr_file_mappings,
 	struct vm_shared_region  *shared_region);
 
+#if !CONFIG_CSR
+/* Match the read-only APFS/bindfs preboot policy in the tested inputfix6 kernel. */
+static boolean_t
+yunluo_shared_cache_on_preboot(vnode_t file)
+{
+	vnode_t preboot = NULLVP;
+	mount_t cache_mount, preboot_mount;
+	const char *cache_type;
+	boolean_t accepted = FALSE;
+
+	if (!file || vnode_vtype(file) != VREG) {
+		return FALSE;
+	}
+	cache_mount = vnode_mount(file);
+	if (!cache_mount || !(vfs_flags(cache_mount) & MNT_RDONLY)) {
+		return FALSE;
+	}
+	cache_type = vfs_statfs(cache_mount)->f_fstypename;
+	if (strcmp(cache_type, "apfs") && strcmp(cache_type, "bindfs")) {
+		return FALSE;
+	}
+	if (vnode_lookup("/private/preboot", 0, &preboot, vfs_context_current())) {
+		return FALSE;
+	}
+	preboot_mount = vnode_mount(preboot);
+	if (!strcmp(cache_type, "apfs")) {
+		accepted = (preboot_mount == cache_mount);
+	} else if (preboot_mount && (vfs_flags(preboot_mount) & MNT_RDONLY)) {
+		accepted = !strcmp(vfs_statfs(preboot_mount)->f_fstypename, "apfs");
+	}
+	vnode_put(preboot);
+	return accepted;
+}
+#endif
+
+#if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER && !CONFIG_CSR
+#if !DEVELOPMENT && !DEBUG
+#error The independent owner cache carrier is a development instrument
+#endif
+extern int native_verified_block_root_authorized(dev_t);
+extern int native_verified_block_volume_device(const char *, dev_t *, char *, size_t);
+unsigned long native_owner_cache_carrier_accepts = 0;
+unsigned long native_owner_cache_carrier_rejects = 0;
+volatile dev_t native_owner_cache_carrier_root_device = NODEV;
+volatile dev_t native_owner_cache_carrier_file_device = NODEV;
+
+static boolean_t
+native_owner_shared_cache_carrier(vnode_t process_root, vnode_t file)
+{
+	const char *root_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2";
+#if defined(XNU_OWNER_CACHE_CARRIER_WRONG_UUID) && XNU_OWNER_CACHE_CARRIER_WRONG_UUID
+	const char *cache_uuid = "9846FE78-2910-4297-AF97-D59BB6F8FC16";
+#else
+	const char *cache_uuid = "8846FE78-2910-4297-AF97-D59BB6F8FC16";
+#endif
+	const char *directory = "/private/preboot/System/Library/Caches/com.apple.dyld";
+	vnode_t expected_parent = NULLVP, device_vnode;
+	dev_t root_device = NODEV, cache_device = NODEV, expected = NODEV;
+	char device_path[64];
+	boolean_t authorized = FALSE;
+	if (process_root != rootvnode || !file || vnode_vtype(file) != VREG) goto out;
+	mount_t root_mount = vnode_mount(process_root), cache_mount = vnode_mount(file);
+	if (!root_mount || !cache_mount || root_mount == cache_mount ||
+	    !(vfs_flags(root_mount) & MNT_RDONLY) || !(vfs_flags(cache_mount) & MNT_RDONLY) ||
+	    strcmp(vfs_statfs(root_mount)->f_fstypename, "apfs") ||
+	    strcmp(vfs_statfs(cache_mount)->f_fstypename, "apfs")) goto out;
+	device_vnode = vfs_devvp(root_mount);
+	if (device_vnode) {
+		root_device = vnode_specrdev(device_vnode);
+		vnode_put(device_vnode);
+	}
+	device_vnode = vfs_devvp(cache_mount);
+	if (device_vnode) {
+		cache_device = vnode_specrdev(device_vnode);
+		vnode_put(device_vnode);
+	}
+	if (root_device == NODEV || cache_device == NODEV ||
+	    !native_verified_block_volume_device(root_uuid, &expected, device_path, sizeof(device_path)) ||
+	    expected != root_device ||
+	    !native_verified_block_volume_device(cache_uuid, &expected, device_path, sizeof(device_path)) ||
+	    expected != cache_device) goto out;
+	if (vnode_lookup(directory, 0, &expected_parent, vfs_context_current())) goto out;
+	authorized = vnode_vtype(expected_parent) == VDIR && vnode_mount(expected_parent) == cache_mount &&
+	    vnode_parent(file) == expected_parent && native_verified_block_root_authorized(root_device);
+out:
+	if (expected_parent) vnode_put(expected_parent);
+	native_owner_cache_carrier_root_device = root_device;
+	native_owner_cache_carrier_file_device = cache_device;
+	if (authorized) os_atomic_inc(&native_owner_cache_carrier_accepts, relaxed);
+	else os_atomic_inc(&native_owner_cache_carrier_rejects, relaxed);
+	return authorized;
+}
+#endif
+
 /*
  * Setup part of _shared_region_map_and_slide().
  * It had to be broken out of _shared_region_map_and_slide() to
@@ -2557,7 +2651,17 @@ after_root_check:
 		 * is either on the root volume or in the preboot cryptex volume.
 		 */
 		assert(rdir_vp != NULL);
+#if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER
+		boolean_t owner_carrier = FALSE;
+#endif
+		boolean_t yunluo_preboot_cache = FALSE;
 		if (srfmp->vp->v_mount != rdir_vp->v_mount) {
+			yunluo_preboot_cache = yunluo_shared_cache_on_preboot(srfmp->vp);
+		}
+		if (!yunluo_preboot_cache && srfmp->vp->v_mount != rdir_vp->v_mount) {
+#if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER
+			owner_carrier = native_owner_shared_cache_carrier(rdir_vp, srfmp->vp);
+#endif
 			vnode_t preboot_vp = NULL;
 #if XNU_TARGET_OS_OSX
 #define PREBOOT_CRYPTEX_PATH "/System/Volumes/Preboot/Cryptexes"
@@ -2565,7 +2669,11 @@ after_root_check:
 #define PREBOOT_CRYPTEX_PATH "/private/preboot/Cryptexes"
 #endif
 			error = vnode_lookup(PREBOOT_CRYPTEX_PATH, 0, &preboot_vp, vfs_context_current());
-			if (error || srfmp->vp->v_mount != preboot_vp->v_mount) {
+			if ((error || srfmp->vp->v_mount != preboot_vp->v_mount)
+#if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER
+			    && !owner_carrier
+#endif
+			    ) {
 				SHARED_REGION_TRACE_ERROR(
 					("shared_region: %p [%d(%s)] map(%p:'%s'): "
 					"not on process' root volume nor preboot volume\n",
@@ -2584,7 +2692,11 @@ after_root_check:
 		}
 #endif /* CONFIG_CSR */
 
-		if (scdir_enforce) {
+		if (scdir_enforce
+#if defined(XNU_OWNER_CACHE_CARRIER) && XNU_OWNER_CACHE_CARRIER && !CONFIG_CSR
+		    && !owner_carrier
+#endif
+		    ) {
 			char **expected_scdir_path = is_driverkit ? driverkit_scdir_path : scdir_path;
 			struct vnode *scdir_vp = NULL;
 			for (expected_scdir_path = is_driverkit ? driverkit_scdir_path : scdir_path;

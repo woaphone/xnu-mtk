@@ -133,6 +133,8 @@ PE_cpu_signal_cancel(cpu_id_t source, cpu_id_t target)
 	sourceCPU->signalCPUCancel(targetCPU);
 }
 
+extern "C" void yunluo_paint_band(int band, unsigned int color);
+
 void
 PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 {
@@ -142,7 +144,11 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 		panic("%s: invalid target CPU %p", __func__, target);
 	}
 
-	targetCPU->initCPU(bootb);
+	{
+		yunluo_paint_band(5, 0xFFFFFFFF);   /* white: PE_cpu_machine_init entered */
+		targetCPU->initCPU(bootb);
+		yunluo_paint_band(6, 0xFFFF0000);   /* red: initCPU returned */
+	}
 #if defined(__arm64__)
 	if (!bootb && (targetCPU->getCPUNumber() == (UInt32)master_cpu)) {
 		ml_set_is_quiescing(false);

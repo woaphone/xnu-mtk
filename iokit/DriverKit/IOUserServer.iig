@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -40,7 +44,7 @@
 @iig end
 */
 
-class KERNEL IOUserServer : public IOService
+class IOUserServer : public IOService
 {
 public:
 	static kern_return_t
@@ -58,10 +62,10 @@ public:
 	free() override;
 
 	virtual kern_return_t
-	Exit(const char reason[1024]) LOCAL;
+	Exit(const char reason[1024]) ;
 
 	virtual kern_return_t
-	LoadModule(const char path[1024]) LOCAL;
+	LoadModule(const char path[1024]) ;
 
 	virtual kern_return_t
 	RegisterService() override;

@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -55,7 +59,7 @@ struct _IOMemoryMapPrivateState {
  * Methods in this class are used for memory that was supplied as a parameter.
  */
 
-class KERNEL IOMemoryMap : public OSObject
+class IOMemoryMap : public OSObject
 {
 public:
 
@@ -70,24 +74,24 @@ public:
      * @return      Address.
      */
 	uint64_t
-	GetAddress() LOCALONLY;
+	GetAddress() ;
 
     /*!
      * @brief       Obtain the length of the memory mapping.
      * @return      Length.
      */
 	uint64_t
-	GetLength() LOCALONLY;
+	GetLength() ;
 
     /*!
      * @brief       Obtain the offset of the memory mapping.
      * @return      Offset.
      */
 	uint64_t
-	GetOffset() LOCALONLY;
+	GetOffset() ;
 };
 
-class EXTENDS (IOMemoryMap) IOMemoryMapPrivate
+class IOMemoryMapPrivate
 {
 	virtual kern_return_t
 	_CopyState(

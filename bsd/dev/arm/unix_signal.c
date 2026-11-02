@@ -350,6 +350,36 @@ sendsig(
 #endif
 			goto bad2;
 		}
+		/* fb196: PerfPowerServices aborts with SIGABRT and no brk record.  This
+		 * is the arm64 signal-delivery point where the full user state is
+		 * available; print a bounded PC/LR/FP/SP and the user frame-pointer
+		 * chain so the next offline pass can symbolicate the abort caller. */
+		if (sig == SIGABRT) {
+			static unsigned yunluo_abort_logs = 0;
+			if (yunluo_abort_logs < 24) {
+				yunluo_abort_logs++;
+				printf("YUNLUO-SIGABRT-PC[%u] pid=%d name=%.20s pc=%llx lr=%llx fp=%llx sp=%llx\n",
+				    yunluo_abort_logs, proc_getpid(p), p->p_comm,
+				    (unsigned long long)ts.ts64.ss.pc,
+				    (unsigned long long)ts.ts64.ss.lr,
+				    (unsigned long long)ts.ts64.ss.fp,
+				    (unsigned long long)ts.ts64.ss.sp);
+				uint64_t yfp = ts.ts64.ss.fp;
+				for (int fi = 0; fi < 6 && yfp > 0x10000ULL &&
+				    yfp < 0x800000000000ULL; fi++) {
+					uint64_t f[2];
+					if (copyin((user_addr_t)yfp, f, sizeof(f)) != 0) {
+						break;
+					}
+					printf("YUNLUO-SIGABRT-fp[%d] ra=%llx\n", fi,
+					    (unsigned long long)f[1]);
+					if (f[0] <= yfp) {
+						break;
+					}
+					yfp = f[0];
+				}
+			}
+		}
 #else
 #error Unsupported architecture
 #endif

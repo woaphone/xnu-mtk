@@ -1,3 +1,4 @@
+#include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
@@ -264,6 +265,7 @@ static void gc_scroll_up(int num, unsigned int top, unsigned int bottom);
 static void gc_set_tab_stop(unsigned int column, boolean_t enabled);
 static void gc_show_cursor(unsigned int xx, unsigned int yy);
 static void gc_update_color(int color, boolean_t fore);
+static void vc_update_color(int color, boolean_t fore);
 
 static void
 gc_clear_line(unsigned int xx, unsigned int yy, int which)
@@ -336,6 +338,10 @@ gc_clear_screen(unsigned int xx, unsigned int yy, int top, unsigned int bottom,
 
 	gc_ops.clear_screen(xx, yy, top, bottom, which);
 }
+
+/* yunluo: color state lives further down but gc_enable() needs it. */
+static uint32_t vc_color_fore;
+static uint32_t vc_color_back;
 
 static void
 gc_enable( boolean_t enable )
@@ -438,11 +444,18 @@ gc_enable( boolean_t enable )
 		VCPUTC_LOCK_UNLOCK();
 
 		gc_ops.clear_screen(gc_x, gc_y, 0, vinfo.v_rows, 2);
+		/* yunluo: default foreground is color code 0 == black in 32bpp. */
+		vc_update_color(7, TRUE);
+		vc_update_color(0, FALSE);
 		gc_ops.show_cursor(gc_x, gc_y);
 
 		gc_ops.enable(TRUE);
 		gc_enabled           = TRUE;
 		disableConsoleOutput = FALSE;
+		/* yunluo: color code 0 is 0x00000000 in 32bpp (black on black) and the
+		 * panel compositor blends on alpha, so force opaque white on opaque black. */
+		vc_color_fore = 0xFFFFFFFFU;
+		vc_color_back = 0xFF000000U;
 	}
 }
 
@@ -1227,9 +1240,17 @@ gc_update_color(int color, boolean_t fore)
 	gc_ops.update_color(color, fore);
 }
 
+/* yunluo: set by NativeLegacyDisplay's prepare_scanout -- the compositor owns
+ * the framebuffer, the text console stops painting (logging goes to the ring). */
+int yunluo_video_console_frozen = 0;
+
 void
 vcputc_options(char c, __unused bool poll)
 {
+	if (boot_progress_active()) { boot_progress_putc(c); return; }
+	if (yunluo_video_console_frozen) {
+		return;
+	}
 	if (gc_initialized && gc_enabled) {
 		VCPUTC_LOCK_LOCK();
 		if (gc_enabled) {
@@ -1575,7 +1596,7 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
 				uint32_t val = *theChar++;
 				if (theCharPrevious == NULL || val != *theCharPrevious++) {
 					val = (vc_color_back & ~val) | (vc_color_fore & val);
-					*store++ = val;
+					*store++ = val | 0xFF000000U;
 				} else {
 					store++;
 				}
@@ -1602,7 +1623,7 @@ vc_paint_char_32(unsigned int xx, unsigned int yy, unsigned char ch, int attrs,
 				}
 
 				val = (vc_color_back & ~val) | (vc_color_fore & val);
-				*store++ = val;
+				*store++ = val | 0xFF000000U;
 				lastpixel = save;
 			}
 
@@ -2896,6 +2917,9 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 			vinfo = new_vinfo;
 		}
 
+		boot_progress_bind(vinfo.v_baseaddr, vinfo.v_width, vinfo.v_height,
+		    vinfo.v_rowbytes, vinfo.v_depth);
+
 		// If we changed the virtual address, remove the old mapping
 		if (newVideoVirt != 0) {
 			if (lastVideoVirt && lastVideoMapSize) {                                                /* Was the framebuffer mapped before? */
@@ -3048,6 +3072,10 @@ initialize_screen(PE_Video * boot_vinfo, unsigned int op)
 	}
 #endif
 	}
+
+	/* Console initialization/acquisition may clear the existing mapping. */
+	boot_progress_bind(vinfo.v_baseaddr, vinfo.v_width, vinfo.v_height,
+	    vinfo.v_rowbytes, vinfo.v_depth);
 }
 
 void vcattach(void); /* XXX gcc 4 warning cleanup */

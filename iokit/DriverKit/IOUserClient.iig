@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -172,7 +176,7 @@ struct IOUserClientMethodDispatch {
 @iig end
 */
 
-class KERNEL IOUserClient : public IOService
+class IOUserClient : public IOService
 {
 public:
 	virtual bool
@@ -208,8 +212,8 @@ public:
 	    IOUserClientMethodArguments       * arguments,
 	    const IOUserClientMethodDispatch  * dispatch,
 	    OSObject                          * target,
-	    void                              * reference) LOCALONLY
-	QUEUENAME(IOUserClientQueueExternalMethod);
+	    void                              * reference) 
+	;
 
 
     /*!
@@ -223,7 +227,7 @@ public:
      */
     virtual void
     AsyncCompletion(
-        OSAction                            * action TARGET,
+        OSAction                            * action ,
         IOReturn                              status,
         const IOUserClientAsyncArgumentsArray asyncData,
 		uint32_t                              asyncDataCount) = 0;
@@ -271,7 +275,7 @@ public:
     * @return   kIOReturnSuccess on success. See IOReturn.h for error codes.
 	*/
 	virtual kern_return_t
-	CopyClientEntitlements(OSDictionary ** entitlements) LOCAL;
+	CopyClientEntitlements(OSDictionary ** entitlements) ;
 
 
 private:
@@ -287,17 +291,16 @@ private:
 		uint64_t                              structureOutputMaximumSize,
 		OSData                             ** structureOutput,
 		IOMemoryDescriptor                  * structureOutputDescriptor,
-        OSAction                            * completion TYPE(IOUserClient::AsyncCompletion)) LOCAL
-	QUEUENAME(IOUserClientQueueExternalMethod);
+        OSAction                            * completion ) 
+	;
 
     virtual void
     KernelCompletion(
-        OSAction                            * action TARGET,
+        OSAction                            * action ,
         IOReturn                              status,
         const IOUserClientAsyncArgumentsArray asyncData,
 		uint32_t                              asyncDataCount)
-        KERNEL
-        TYPE(IOUserClient::AsyncCompletion);
+        ;
 };
 
 #endif /* ! _IOKIT_UIOUSERCLIENT_H */

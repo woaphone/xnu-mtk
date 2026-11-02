@@ -69,6 +69,22 @@
 #include <kern/counter.h>
 #endif /* XNU_KERNEL_PRIVATE */
 
+/*
+ * The XNU signature type system is an Apple clang extension. Upstream clang
+ * (the Linux porting build) has no such builtins; disable signature emission
+ * rather than failing the compile. Signatures are compile-time diagnostics:
+ * the kernel still selects zones by size/flags with an empty signature.
+ */
+#if !__has_builtin(__builtin_xnu_type_signature)
+#define __builtin_xnu_type_signature(type) ""
+#endif
+#if !__has_builtin(__builtin_xnu_type_summary)
+#define __builtin_xnu_type_summary(type) 0
+#endif
+#if !__has_builtin(__builtin_xnu_types_compatible)
+#define __builtin_xnu_types_compatible(type1, type2) 1
+#endif
+
 __BEGIN_DECLS __ASSUME_PTR_ABI_SINGLE_BEGIN
 
 /*!

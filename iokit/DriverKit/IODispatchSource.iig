@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -41,7 +45,7 @@ typedef void (^IODispatchSourceCancelHandler)(void);
  * IODispatchSource common base class for dispatch sources.
  */
 
-class NATIVE KERNEL IODispatchSource : public OSObject
+class IODispatchSource : public OSObject
 {
 public:
 
@@ -60,10 +64,10 @@ public:
 		IODispatchSourceCancelHandler handler) = 0;
 
 	virtual kern_return_t
-	CheckForWork(bool synchronous) INVOKEREPLY = 0;
+	CheckForWork(bool synchronous) = 0;
 
 	virtual kern_return_t
-	SetEnable(bool enable) LOCAL;
+	SetEnable(bool enable) ;
 };
 
 #endif /* ! _IOKIT_UIODISPATCHSOURCE_H */

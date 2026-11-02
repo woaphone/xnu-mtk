@@ -55,6 +55,8 @@ protected:
 
 public:
 
+	virtual kern_return_t Dispatch(const IORPC rpc) APPLE_KEXT_OVERRIDE;
+
 	/*!
 	 * @brief       This function is to be called to create IOExtensiblePaniclog object.
 	 * @discussion  First function to be called.

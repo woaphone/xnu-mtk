@@ -29,6 +29,7 @@
 #include <sys/sysctl.h>
 #include <libkern/libkern.h>
 #include <kern/hvg_hypercall.h>
+#include <pexpert/pexpert.h>
 #include <stdbool.h>
 
 /* Translate hypercall error code to syscall error code */
@@ -141,6 +142,20 @@ sysctl_vmm_present(__unused struct sysctl_oid *oidp,
 #if defined(__arm64__)
 	extern int IODTGetDefault(const char *key, void *infoAddr, unsigned int infoSize );
 	(void) IODTGetDefault("vmm-present", &vmm_present, sizeof(vmm_present));
+	/* fb164: this port runs iOS userspace on bare metal, and watchdogd treats
+	 * "no vmm-present" plus "no IOWatchdog service" as unrecoverable: it takes
+	 * the __os_crash() path at +0xab0c instead of the graceful VM exit.  The
+	 * device tree has no vmm-present property, so answer 1 here; the graceful
+	 * path watchdogd then takes is exit(0), never a hardware arming.
+	 * yunluo-vmm-present=0 restores the bootloader's (absent) answer. */
+	vmm_present = 1;
+	{
+		unsigned yunluo_vmm = 1;
+		if (PE_parse_boot_argn("yunluo-vmm-present", &yunluo_vmm,
+		    sizeof(yunluo_vmm)) && yunluo_vmm == 0) {
+			vmm_present = 0;
+		}
+	}
 #elif defined(__x86_64__)
 	extern boolean_t cpuid_vmm_present(void);
 	vmm_present = cpuid_vmm_present();

@@ -33,7 +33,9 @@
 #include <pexpert/arm64/board_config.h>
 #include <mach_assert.h>
 #include <machine/asm.h>
+#if defined(APPLE_ARM64_ARCH_FAMILY)
 #include <arm64/tunables/tunables.s>
+#endif
 #include <arm64/exception_asm.h>
 
 #if __ARM_KERNEL_PROTECT__
@@ -143,8 +145,8 @@ LEXT(reset_vector)
 	adrp	x19, EXT(ResetHandlerData)@page			// Get address of the reset handler data
 	add		x19, x19, EXT(ResetHandlerData)@pageoff
 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
-#if HAS_CLUSTER
-	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1
+#if HAS_CLUSTER || defined(BCM2837)
+	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1 (SM8550 numbers cores in Affinity1)
 #else
 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
 #endif
@@ -424,6 +426,10 @@ start_cpu:
 
 	/* allocate an L2 table */
 3:	add	$4, $4, PGBYTES
+	/* Refuse before a new table can overwrite adjacent kernel globals. */
+	add $6, x25, #(BOOTSTRAP_TABLE_BYTES >> 12), lsl #12
+	cmp $4, $6
+	b.hs Lbootstrap_tables_exhausted
 
 	/* create_l1_table_entry(virt_base, L1 table, L2 table, scratch1, scratch2, scratch3) */
 	create_l1_table_entry	$0, $3, $4, $6, $7, $8
@@ -526,8 +532,8 @@ LEXT(start_first_cpu)
 	// Invalidate all entries in the bootstrap page tables
 	mov		x0, #(ARM_TTE_EMPTY)				// Load invalid entry template
 	mov		x1, x25								// Start at V=P pagetable root
-	mov		x2, #(TTE_PGENTRIES)				// Load number of entries per page
-	lsl		x2, x2, #2							// Shift by 2 for num entries on 4 pages
+	mov		x2, #(BOOTSTRAP_TABLE_BYTES / ARM_PGBYTES)
+	lsl		x2, x2, #(ARM_PGSHIFT - TTE_SHIFT) // Clear the whole reserved pool
 
 Linvalidate_bootstrap:							// do {
 	str		x0, [x1], #(1 << TTE_SHIFT)			//   Invalidate and advance
@@ -611,6 +617,12 @@ Lkernelcache_base_found:
 	lsr		x5,  x24, #(ARM_TT_L2_SHIFT)
 	create_bootstrap_mapping x14, x15, x5, x3, x2, x9, x10, x11, x12, x13
 
+	b Lbootstrap_tables_ready
+Lbootstrap_tables_exhausted:
+	// MMU is still off. Stop with the offending cursor/end preserved for
+	// the early debugger rather than corrupting memory or forging a map.
+	b Lbootstrap_tables_exhausted
+Lbootstrap_tables_ready:
 	/* Ensure TTEs are visible */
 	dsb		ish
 
@@ -695,7 +707,7 @@ common_start:
 	dsb		ish
 
 
-#if defined(BCM2837)
+#if defined(BCM2837) && (!defined(XNU_NATIVE_ARCH_TIMER) || !XNU_NATIVE_ARCH_TIMER)
 	// Setup timer interrupt routing; must be done before MMU is enabled
 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
 	and		x15, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
@@ -783,10 +795,13 @@ common_start:
 	// Initialization common to all non-virtual Apple targets
 #endif  // APPLE_ARM64_ARCH_FAMILY
 
+
+#if defined(APPLE_ARM64_ARCH_FAMILY)
 	// Read MIDR before start of per-SoC tunables
 	mrs x12, MIDR_EL1
 
 	APPLY_TUNABLES x12, x13, x14
+#endif
 
 #if HAS_CLUSTER && !NO_CPU_OVRD
 	// Unmask external IRQs if we're restarting from non-retention WFI

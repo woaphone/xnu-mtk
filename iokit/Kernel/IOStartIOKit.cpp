@@ -182,6 +182,20 @@ StartIOKitMatching(void)
 {
 	SOCD_TRACE_XNU(START_IOKIT);
 	assert(gRootNub != NULL);
+	/*
+	 * Yunluo bring-up: record the exact root nub identity that the platform
+	 * personalities will be matched against.  If the ADT handed over by
+	 * DarwinBoot is not the one we packaged, this line says so before any
+	 * driver can fail to match.
+	 */
+	{
+		OSData * model = OSDynamicCast(OSData, gRootNub->getProperty("model"));
+		OSData * compat = OSDynamicCast(OSData, gRootNub->getProperty("compatible"));
+		const char * modelStr = model ? (const char *)model->getBytesNoCopy() : "(none)";
+		const char * compatStr = compat ? (const char *)compat->getBytesNoCopy() : "(none)";
+		IOLog("YUNLUO-PLAT: root name=%s model=%.48s compatible=%.96s\n",
+		    gRootNub->getName(), modelStr, compatStr);
+	}
 	bool ok = gRootNub->startIOServiceMatching();
 	if (__improbable(!ok)) {
 		panic("Failed to start IOService matching");

@@ -27,6 +27,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <err.h>
+#include <libc.h>
 #include <sysexits.h>
 
 #include <sys/stat.h>
@@ -124,6 +125,15 @@ main(int argc, char * argv[])
 	}
 
 	ret = rename(dsttmpname, dst);
+	if (ret < 0 && (errno == EACCES || errno == EPERM)) {
+		/*
+		 * DrvFs (WSL /mnt) exposes an installed 0444 file as a
+		 * Windows read-only file, and rename() over it fails.
+		 * Clear the attribute and retry.
+		 */
+		(void)chmod(dst, 0644);
+		ret = rename(dsttmpname, dst);
+	}
 	if (ret < 0) {
 		err(EX_NOINPUT, "rename(%s, %s)", dsttmpname, dst);
 	}

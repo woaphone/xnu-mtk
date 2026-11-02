@@ -44,6 +44,60 @@ extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
 extern void
 unix_syscall(struct arm_saved_state * regs, thread_t thread_act, struct proc * proc);
 
+/* yunluo bring-up: pid 1 syscall trace (entry vs return, sysctl name). */
+volatile uint32_t yunluo_sc_enter;
+volatile uint32_t yunluo_sc_return;
+volatile uint32_t yunluo_sc_code;
+volatile uint64_t yunluo_sc_arg0;
+volatile uint64_t yunluo_sc_arg1;
+volatile int32_t  yunluo_sysctl_name[4];
+volatile uint32_t yunluo_sysctl_count;
+
+extern const char *syscallnames[];
+#define YUNLUO_SC_SLOTS 48
+volatile uint32_t yunluo_trace_idx;
+volatile uint32_t yunluo_trace_code[YUNLUO_SC_SLOTS];
+volatile uint64_t yunluo_trace_a0[YUNLUO_SC_SLOTS];
+volatile uint64_t yunluo_trace_a1[YUNLUO_SC_SLOTS];
+volatile uint64_t yunluo_trace_a2[YUNLUO_SC_SLOTS];
+volatile const char *volatile yunluo_trace_name[YUNLUO_SC_SLOTS];
+volatile char yunluo_arg_str[80];
+volatile uint64_t yunluo_sc_arg2, yunluo_sc_arg3, yunluo_sc_arg4, yunluo_sc_arg5;
+volatile char yunluo_write_first[128];
+volatile char yunluo_write_last[128];
+volatile uint32_t yunluo_write_count;
+#define YUNLUO_WR_SLOTS 16
+volatile char yunluo_write_ring[YUNLUO_WR_SLOTS][192];
+volatile uint32_t yunluo_write_ridx;
+volatile char yunluo_sysctl_str[64];
+
+static void
+yunluo_sniff(user_addr_t addr, volatile char *dst, int max)
+{
+	char tmp[128];
+	if (max > (int)sizeof(tmp)) {
+		max = (int)sizeof(tmp);
+	}
+	if (copyin(addr, tmp, max - 1) != 0) {
+		dst[0] = 0;
+		return;
+	}
+	tmp[max - 1] = 0;
+	for (int i = 0; i < max - 1; i++) {
+		unsigned char c = (unsigned char)tmp[i];
+		if (c == 0 || c < 0x20 || c > 0x7e) {
+			tmp[i] = 0;
+			for (int j = i + 1; j < max; j++) {
+				tmp[j] = 0;
+			}
+			break;
+		}
+	}
+	for (int j = 0; j < max; j++) {
+		dst[j] = tmp[j];
+	}
+}
+
 static int      arm_get_syscall_args(uthread_t, struct arm_saved_state *, const struct sysent *);
 static int      arm_get_u32_syscall_args(uthread_t, arm_saved_state32_t *, const struct sysent *);
 static void     arm_prepare_u32_syscall_return(const struct sysent *, arm_saved_state_t *, uthread_t, int);
@@ -150,6 +204,75 @@ unix_syscall(
 #endif
 	pid = proc_pid(proc);
 
+	if (pid == 1) {
+		uint64_t a0, a1, a2, a3, a4, a5;
+		if (is_saved_state32(state)) {
+			a0 = uthread->uu_arg[0];
+			a1 = uthread->uu_arg[1];
+			a2 = uthread->uu_arg[2];
+			a3 = uthread->uu_arg[3];
+			a4 = uthread->uu_arg[4];
+			a5 = uthread->uu_arg[5];
+		} else {
+			a0 = saved_state64(state)->x[0];
+			a1 = saved_state64(state)->x[1];
+			a2 = saved_state64(state)->x[2];
+			a3 = saved_state64(state)->x[3];
+			a4 = saved_state64(state)->x[4];
+			a5 = saved_state64(state)->x[5];
+		}
+		yunluo_sc_enter++;
+		{
+			uint32_t slot = yunluo_trace_idx % YUNLUO_SC_SLOTS;
+			yunluo_trace_code[slot] = code;
+			yunluo_trace_a0[slot] = a0;
+			yunluo_trace_a1[slot] = a1;
+			yunluo_trace_a2[slot] = a2;
+			yunluo_trace_name[slot] =
+			    (code < nsysent) ? syscallnames[code] : "invalid";
+			yunluo_trace_idx++;
+		}
+		yunluo_sc_code = code;
+		yunluo_sc_arg0 = a0;
+		yunluo_sc_arg1 = a1;
+		yunluo_sc_arg2 = a2;
+		yunluo_sc_arg3 = a3;
+		yunluo_sc_arg4 = a4;
+		yunluo_sc_arg5 = a5;
+		if (a0 >= 0x100000000ULL && a0 < 0x800000000000ULL) {
+			yunluo_sniff((user_addr_t)a0, yunluo_arg_str, (int)sizeof(yunluo_arg_str));
+		}
+		if (code == 4 && a0 <= 3 && a1 >= 0x100000000ULL && a1 < 0x800000000000ULL) {
+			yunluo_write_count++;
+			if (yunluo_write_count == 1) {
+				yunluo_sniff((user_addr_t)a1, yunluo_write_first, (int)sizeof(yunluo_write_first));
+			}
+			yunluo_sniff((user_addr_t)a1, yunluo_write_last, (int)sizeof(yunluo_write_last));
+			{
+				uint32_t slot = yunluo_write_ridx % YUNLUO_WR_SLOTS;
+				yunluo_sniff((user_addr_t)a1, yunluo_write_ring[slot],
+				    (int)sizeof(yunluo_write_ring[slot]));
+				yunluo_write_ridx++;
+			}
+		}
+		if (code == 202) {
+			int32_t nm[4] = { 0, 0, 0, 0 };
+			if (a4 >= 0x100000000ULL && a4 < 0x800000000000ULL) {
+				yunluo_sniff((user_addr_t)a4, yunluo_sysctl_str,
+				    (int)sizeof(yunluo_sysctl_str));
+			} else {
+				yunluo_sysctl_str[0] = 0;
+			}
+			if (copyin((user_addr_t)a0, nm, sizeof(nm)) == 0) {
+				yunluo_sysctl_name[0] = nm[0];
+				yunluo_sysctl_name[1] = nm[1];
+				yunluo_sysctl_name[2] = nm[2];
+				yunluo_sysctl_name[3] = nm[3];
+				yunluo_sysctl_count++;
+			}
+		}
+	}
+
 #ifdef CONFIG_IOCOUNT_TRACE
 	uthread->uu_iocount = 0;
 	uthread->uu_vpindex = 0;
@@ -205,6 +328,10 @@ skip_syscall:
 #endif /* DEBUG || DEVELOPMENT */
 
 	arm_prepare_syscall_return(callp, state, uthread, error);
+
+	if (proc_pid(proc) == 1) {
+		yunluo_sc_return++;
+	}
 
 	uthread->uu_flag &= ~UT_NOTCANCELPT;
 	uthread->syscall_code = 0;
@@ -265,6 +392,10 @@ unix_syscall_return(int error)
 	 * Get index into sysent table
 	 */
 	arm_prepare_syscall_return(callp, regs, uthread, error);
+
+	if (proc_pid(proc) == 1) {
+		yunluo_sc_return++;
+	}
 
 	uthread->uu_flag &= ~UT_NOTCANCELPT;
 	uthread->syscall_code = 0;

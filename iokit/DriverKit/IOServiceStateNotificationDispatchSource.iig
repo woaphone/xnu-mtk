@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -34,7 +38,7 @@
 #include <DriverKit/IOService.iig>
 
 
-class NATIVE KERNEL IOServiceStateNotificationDispatchSource : public IODispatchSource
+class IOServiceStateNotificationDispatchSource : public IODispatchSource
 {
 public:
 
@@ -55,7 +59,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	static kern_return_t
-	Create(IOService * service, OSArray * items, IODispatchQueue * queue, IOServiceStateNotificationDispatchSource ** source) LOCAL;
+	Create(IOService * service, OSArray * items, IODispatchQueue * queue, IOServiceStateNotificationDispatchSource ** source) ;
 
 
     /*!
@@ -68,7 +72,7 @@ public:
 	virtual kern_return_t
 	SetEnableWithCompletion(
 		bool enable,
-		IODispatchSourceCancelHandler handler) override LOCAL;
+		IODispatchSourceCancelHandler handler) override ;
 
     /*!
      * @brief       Cancel all callbacks from the event source.
@@ -77,7 +81,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	virtual kern_return_t
-	Cancel(IODispatchSourceCancelHandler handler) override LOCAL;
+	Cancel(IODispatchSourceCancelHandler handler) override ;
 
     /*!
      * @brief       Set the handler block to run when the notification has become ready.
@@ -89,7 +93,7 @@ public:
      */
 	virtual kern_return_t
 	SetHandler(
-	OSAction * action TYPE(StateNotificationReady));
+	OSAction * action );
 
     /*!
      * @brief       Rearm the notification.
@@ -103,7 +107,7 @@ public:
 private:
 	virtual void
 	StateNotificationReady(
-		OSAction  * action TARGET) LOCAL = 0;
+		OSAction  * action ) = 0;
 };
 
 #endif /* ! _IOKIT_UIOSERVICESTATEDISPATCHSOURCE_H */

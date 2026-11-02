@@ -280,6 +280,20 @@ PE_cpu_start(cpu_id_t target,
 	return KERN_SUCCESS;
 }
 
+#if !defined(HAS_IPI)
+// Native ARM64 board: no AIC and no ACC fast-IPI registers.  Signal a CPU with
+// SGI 0 through the GICv3 system register interface; the per-CPU interrupt
+// driver (ArmCpu) delivers INTID 0 to cpu_signal_handler().
+static void
+native_send_sgi(uint32_t mpidr)
+{
+	uint64_t aff = mpidr;
+	uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) |
+	    ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
+	__asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+}
+#endif
+
 // Initialize a CPU when it first comes up.  Runs on the target CPU.
 // |bootb| is true on the initial boot, false on S2R resume.
 void
@@ -293,11 +307,21 @@ PE_cpu_machine_init(cpu_id_t target, boolean_t bootb)
 
 	ml_broadcast_cpu_event(CPU_BOOTED, cpu_id);
 
-	// Send myself an IPI to clear SIGPdisabled.  Hang here if IPIs are broken.
-	// (Probably only works on the boot CPU.)
-	PE_cpu_signal(target, target);
-	while (ml_get_interrupts_enabled() && !ml_cpu_signal_is_enabled()) {
-		OSMemoryBarrier();
+#if !defined(HAS_IPI)
+	if (!aic_ipis) {
+		// No AIC: an IPI would never be delivered, so clear SIGPdisabled by
+		// running the signal dispatcher the IPI would have invoked.
+		extern "C" void cpu_signal_handler_internal(boolean_t);
+		cpu_signal_handler_internal(FALSE);
+	} else
+#endif
+	{
+		// Send myself an IPI to clear SIGPdisabled.  Hang here if IPIs are broken.
+		// (Probably only works on the boot CPU.)
+		PE_cpu_signal(target, target);
+		while (ml_get_interrupts_enabled() && !ml_cpu_signal_is_enabled()) {
+			OSMemoryBarrier();
+		}
 	}
 }
 
@@ -314,9 +338,16 @@ PE_cpu_signal(cpu_id_t /*source*/, cpu_id_t target)
 	struct ml_topology_cpu *cpu = &topology_info->cpus[target_to_cpu_id(target)];
 	if (aic_ipis) {
 		gAIC->sendIPI(cpu->cpu_id, false);
-	} else {
+	}
+#if !defined(HAS_IPI)
+	else {
+		native_send_sgi((uint32_t)cpu->phys_id);
+	}
+#else
+	else {
 		ml_cpu_signal(cpu->phys_id);
 	}
+#endif
 }
 
 void
@@ -325,9 +356,16 @@ PE_cpu_signal_deferred(cpu_id_t /*source*/, cpu_id_t target)
 	struct ml_topology_cpu *cpu = &topology_info->cpus[target_to_cpu_id(target)];
 	if (aic_ipis) {
 		gAIC->sendIPI(cpu->cpu_id, true);
-	} else {
+	}
+#if !defined(HAS_IPI)
+	else {
+		native_send_sgi((uint32_t)cpu->phys_id);
+	}
+#else
+	else {
 		ml_cpu_signal_deferred(cpu->phys_id);
 	}
+#endif
 }
 
 void
@@ -336,9 +374,16 @@ PE_cpu_signal_cancel(cpu_id_t /*source*/, cpu_id_t target)
 	struct ml_topology_cpu *cpu = &topology_info->cpus[target_to_cpu_id(target)];
 	if (aic_ipis) {
 		gAIC->cancelDeferredIPI(cpu->cpu_id);
-	} else {
+	}
+#if !defined(HAS_IPI)
+	else {
+		(void)cpu;   // deferred IPIs are sent immediately on native boards
+	}
+#else
+	else {
 		ml_cpu_signal_retract(cpu->phys_id);
 	}
+#endif
 }
 
 // Brings down one CPU core for S2R.  Runs on the target CPU.

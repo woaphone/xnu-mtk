@@ -238,22 +238,53 @@ ml_cpu_signal_type(unsigned int cpu_mpidr, uint32_t type)
 }
 #endif
 
+/* Bring-up breadcrumb: paint one 1/16th band of the boot frame buffer.
+ * Layout matches the first fields of struct vc_info (osfmk/console/video_console.h). */
+struct yunluo_vc_info {
+	unsigned int v_height;
+	unsigned int v_width;
+	unsigned int v_depth;
+	unsigned int v_rowbytes;
+	unsigned long v_baseaddr;
+};
+extern struct yunluo_vc_info vinfo;
+
+void yunluo_paint_band(int band, unsigned int color);
+
+void
+yunluo_paint_band(int band, unsigned int color)
+
+{
+	/* Bring-up bands disabled: they repainted the console screen. */
+	(void)band;
+	(void)color;
+}
+
 #if !defined(HAS_IPI)
-__dead2
+/* Native ARM64 boards have no AIC and no ACC fast-IPI registers.  Signal a CPU
+ * with SGI 0 through the GICv3 system register interface; the per-CPU
+ * interrupt driver (ArmCpu) delivers INTID 0 to cpu_signal_handler(). */
+static void
+native_gic_send_sgi(unsigned int cpu_mpidr)
+{
+	uint64_t aff = cpu_mpidr;
+	uint64_t sgi = ((aff & 0xff00000000ULL) << 16) | ((aff & 0xff0000) << 16) |
+	    ((aff & 0xff00) << 8) | (1ULL << (aff & 0xff));
+	__asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" :: "r" (sgi) : "memory");
+}
 #endif
+
 void
 ml_cpu_signal(unsigned int cpu_mpidr __unused)
 {
 #if defined(HAS_IPI)
 	ml_cpu_signal_type(cpu_mpidr, ARM64_REG_IPI_RR_TYPE_IMMEDIATE);
 #else
-	panic("Platform does not support ACC Fast IPI");
+	yunluo_paint_band(3, 0xFFFFFF00);   /* yellow: AppleARMCPU reached ml_cpu_signal */
+	native_gic_send_sgi(cpu_mpidr);
 #endif
 }
 
-#if !defined(HAS_IPI)
-__dead2
-#endif
 void
 ml_cpu_signal_deferred_adjust_timer(uint64_t nanosecs)
 {
@@ -280,7 +311,6 @@ ml_cpu_signal_deferred_adjust_timer(uint64_t nanosecs)
 	MSR("S3_5_C15_C3_1", abstime);
 #else
 	(void)nanosecs;
-	panic("Platform does not support ACC Fast IPI");
 #endif
 }
 
@@ -294,29 +324,24 @@ ml_cpu_signal_deferred_get_timer()
 #endif
 }
 
-#if !defined(HAS_IPI)
-__dead2
-#endif
 void
 ml_cpu_signal_deferred(unsigned int cpu_mpidr __unused)
 {
 #if defined(HAS_IPI)
 	ml_cpu_signal_type(cpu_mpidr, ARM64_REG_IPI_RR_TYPE_DEFERRED);
 #else
-	panic("Platform does not support ACC Fast IPI deferral");
+	native_gic_send_sgi(cpu_mpidr);
 #endif
 }
 
-#if !defined(HAS_IPI)
-__dead2
-#endif
 void
 ml_cpu_signal_retract(unsigned int cpu_mpidr __unused)
 {
 #if defined(HAS_IPI)
 	ml_cpu_signal_type(cpu_mpidr, ARM64_REG_IPI_RR_TYPE_RETRACT);
 #else
-	panic("Platform does not support ACC Fast IPI retraction");
+	/* SGI signals are not latched, so there is nothing to retract. */
+	(void)cpu_mpidr;
 #endif
 }
 

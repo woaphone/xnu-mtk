@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -35,7 +39,7 @@
 typedef void (^IODataQueueClientEnqueueEntryBlock)(void *data, size_t dataSize);
 typedef void (^IODataQueueClientDequeueEntryBlock)(const void *data, size_t dataSize);
 
-class NATIVE KERNEL IODataQueueDispatchSource : public IODispatchSource
+class IODataQueueDispatchSource : public IODispatchSource
 {
 public:
 
@@ -60,7 +64,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
     static size_t
-    GetDataQueueEntryHeaderSize() LOCALONLY;
+    GetDataQueueEntryHeaderSize() ;
 
 	virtual bool
 	init() override;
@@ -77,7 +81,7 @@ public:
      */
 	virtual kern_return_t
 	SetDataAvailableHandler(
-	OSAction * action TYPE(DataAvailable));
+	OSAction * action );
 
     /*!
      * @brief       As a producer, set the handler block to run when the queue becomes non-full, after an attempt
@@ -89,7 +93,7 @@ public:
      */
 	virtual kern_return_t
 	SetDataServicedHandler(
-	OSAction * action TYPE(DataServiced));
+	OSAction * action );
 
     /*!
      * @brief       Control the enable state of the interrupt source.
@@ -101,7 +105,7 @@ public:
 	virtual kern_return_t
 	SetEnableWithCompletion(
 		bool enable,
-		IODispatchSourceCancelHandler handler) override LOCAL;
+		IODispatchSourceCancelHandler handler) override ;
 
     /*!
      * @brief       Cancel all callbacks from the event source.
@@ -110,7 +114,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	virtual kern_return_t
-	Cancel(IODispatchSourceCancelHandler handler) override LOCAL;
+	Cancel(IODispatchSourceCancelHandler handler) override ;
 
 
     /*!
@@ -118,7 +122,7 @@ public:
      * @return      True if the queue is non-empty.
      */
 	bool
-	IsDataAvailable(void) LOCALONLY;
+	IsDataAvailable(void) ;
 
     /*!
      * @brief       As a consumer, get access to the next queue entry without dequeuing it.
@@ -128,7 +132,7 @@ public:
      *              kIOReturnError if the queue was corrupt.
      */
 	kern_return_t
-	Peek(IODataQueueClientDequeueEntryBlock callback) LOCALONLY;
+	Peek(IODataQueueClientDequeueEntryBlock callback) ;
 
     /*!
      * @brief       As a consumer, dequeue the next queue entry.
@@ -138,7 +142,7 @@ public:
      *              kIOReturnError if the queue was corrupt.
      */
 	kern_return_t
-	Dequeue(IODataQueueClientDequeueEntryBlock callback) LOCALONLY;
+	Dequeue(IODataQueueClientDequeueEntryBlock callback) ;
 
     /*!
      * @brief       As a producer, enqueue a queue entry.
@@ -149,7 +153,7 @@ public:
      *              kIOReturnError if the queue was corrupt.
      */
 	kern_return_t
-	Enqueue(uint32_t dataSize, IODataQueueClientEnqueueEntryBlock callback) LOCALONLY;
+	Enqueue(uint32_t dataSize, IODataQueueClientEnqueueEntryBlock callback) ;
 
     /*!
      * @brief       As a consumer, dequeue the next queue entry, but don't send any DataServiced notification.
@@ -162,7 +166,7 @@ public:
      *              kIOReturnError if the queue was corrupt.
      */
 	kern_return_t
-	DequeueWithCoalesce(bool * sendDataServiced, IODataQueueClientDequeueEntryBlock callback) LOCALONLY;
+	DequeueWithCoalesce(bool * sendDataServiced, IODataQueueClientDequeueEntryBlock callback) ;
 
     /*!
      * @brief       As a producer, enqueue a queue entry, but don't send any DataAvailable notification.
@@ -176,7 +180,7 @@ public:
      *              kIOReturnError if the queue was corrupt.
      */
 	kern_return_t
-	EnqueueWithCoalesce(uint32_t dataSize,  bool * sendDataAvailable, IODataQueueClientEnqueueEntryBlock callback) LOCALONLY;
+	EnqueueWithCoalesce(uint32_t dataSize,  bool * sendDataAvailable, IODataQueueClientEnqueueEntryBlock callback) ;
 
     /*!
      * @brief       As a producer, check if the queue has sufficient free space for a queue entry with the specified size.
@@ -186,7 +190,7 @@ public:
      *              kIOReturnError if the queue was corrupt
      */
 	kern_return_t
-	CanEnqueueData(uint32_t dataSize) LOCALONLY;
+	CanEnqueueData(uint32_t dataSize) ;
 
     /*!
      * @brief       As a producer, check if the queue has sufficient free space for queue entries with the specified size.
@@ -197,19 +201,19 @@ public:
      *              kIOReturnError if the queue was corrupt
      */
 	kern_return_t
-	CanEnqueueData(uint32_t dataSize, uint32_t entryCount) LOCALONLY;
+	CanEnqueueData(uint32_t dataSize, uint32_t entryCount) ;
 
     /*!
      * @brief       As a consumer, send the DataServiced notification indicated by DequeueWithCoalesce.
 	 */
 	void
-	SendDataServiced(void) LOCALONLY;
+	SendDataServiced(void) ;
 
     /*!
      * @brief       As a producer, send the DataAvailable notification indicated by EnqueueWithCoalesce.
 	 */
 	void
-	SendDataAvailable(void) LOCALONLY;
+	SendDataAvailable(void) ;
 
 private:
 	virtual kern_return_t
@@ -225,15 +229,15 @@ private:
 	OSAction ** action);
 
 	virtual kern_return_t
-	CheckForWork(bool synchronous) override LOCAL;
+	CheckForWork(bool synchronous) override ;
 
 	virtual void
 	DataAvailable(
-		OSAction * action TARGET) LOCAL = 0;
+		OSAction * action ) = 0;
 
 	virtual void
 	DataServiced(
-		OSAction * action TARGET) LOCAL = 0;
+		OSAction * action ) = 0;
 };
 
 #endif /* ! _IOKIT_UIODATAQUEUEDISPATCHSOURCE_H */

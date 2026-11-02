@@ -1,3 +1,4 @@
+#include <kern/boot_progress.h>
 /*
  * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
  *
@@ -161,6 +162,9 @@ static void handle_uncategorized(arm_saved_state_t *);
 static void handle_kernel_breakpoint(arm_saved_state_t *, uint32_t);
 
 static void handle_breakpoint(arm_saved_state_t *, uint32_t) __dead2;
+/* fb192: the EL0 brk dispatch site redirects one display-mode trap and
+ * needs the process name; declare it before its use, not after. */
+extern char *proc_name_address(void *p);
 
 typedef void (*abort_inspector_t)(uint32_t, fault_status_t *, vm_prot_t *);
 static void inspect_instruction_abort(uint32_t, fault_status_t *, vm_prot_t *);
@@ -847,6 +851,235 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far, __unused
 			handle_kernel_breakpoint(state, esr);
 			break;
 		} else {
+			/* fb194: every process that builds an FBSDisplayMode reaches this
+			 * assertion, and fb192/fb193 showed a three-name allow-list only
+			 * covered part of them: contextstored kept dying with sig=5 on the
+			 * same site.  Identify the trap instead of the process.
+			 *
+			 * The site, read as raw words from dyld_shared_cache_arm64.09 at
+			 * VA - 0x199130000, is unslid 0x19f3d0744 = d4200000 (brk #0).
+			 * Only the page offset survives ASLR, so the message string in x0
+			 * and the object in x19 are checked as well before anything is
+			 * redirected.
+			 *
+			 * handle_breakpoint() is __dead2, so this cannot live inside it:
+			 * fb191 returned from there and the device still delivered sig=5.
+			 * The kernel arm above already uses `break` for handled-and-resume.
+			 *
+			 * 0x8c earlier is 0x6b8, the success arm's `mov x0, x19`. */
+			if (is_saved_state64(state)) {
+				uint64_t ypc2 = get_saved_state_pc(state);
+				uint64_t ymsgp = saved_state64(state)->x[0];
+				const char *ywant = "FBSDisplayMode";
+				char ytag[16];
+				int yismode = 0;
+				if ((ypc2 & 0xfffULL) == 0x744ULL &&
+				    ymsgp > 0x100000ULL && ymsgp < 0x800000000000ULL &&
+				    copyin((user_addr_t)ymsgp, ytag, sizeof(ytag)) == 0) {
+					int yk;
+					yismode = 1;
+					for (yk = 0; yk < 14; yk++) {
+						if (ytag[yk] != ywant[yk]) {
+							yismode = 0;
+							break;
+						}
+					}
+				}
+				if (yismode) {
+					uint64_t yobj2 = saved_state64(state)->x[19];
+					uint64_t yhdr[6];
+					uint64_t yw3 = 0;
+					uint64_t yh3 = 0;
+					int yok = 0;
+					if (yobj2 > 0x100000ULL && yobj2 < 0x800000000000ULL &&
+					    copyin((user_addr_t)yobj2, yhdr, sizeof(yhdr)) == 0) {
+						yw3 = yhdr[1] & 0xffffffffULL;
+						yh3 = yhdr[2] & 0xffffffffULL;
+						if (yw3 >= 320 && yw3 <= 8192 &&
+						    yh3 >= 320 && yh3 <= 8192 &&
+						    yhdr[5] == 0x404e000000000000ULL) {
+							yok = 1;
+						}
+					}
+					if (yok) {
+						task_t yt2 = current_task();
+						char *yn3 = (yt2 != TASK_NULL) ?
+						    proc_name_address(get_bsdtask_info(yt2)) : NULL;
+						static unsigned yfix4 = 0;
+						double yone = 1.0;
+						if (yfix4 < 16) {
+							yfix4++;
+							printf("YUNLUO-FIX4 resume %s pc=%llx -> %llx"
+							    " x19=%llx wh=%llx:%llx\n",
+							    yn3 ? yn3 : "?",
+							    (unsigned long long)ypc2,
+							    (unsigned long long)(ypc2 - 0x8cULL),
+							    (unsigned long long)yobj2,
+							    (unsigned long long)yw3,
+							    (unsigned long long)yh3);
+						}
+						/* fb193: the object still carries scale 0.0 at +0x20
+						 * (stp d0, d8, [x19, #0x20]); a resumed mode with a
+						 * zero scale fails the next validation. */
+						(void) copyout(&yone,
+						    (user_addr_t)(yobj2 + 0x20), sizeof(yone));
+						set_saved_state_pc(state, ypc2 - 0x8cULL);
+						break;
+					}
+				}
+			}
+			/* fb195: SessionSyncEngine's Keybag.IOSKeybag singleton initializer
+			 * (unslid 0x1c18f6274, dyld_shared_cache_arm64.21) traps 13/13 in
+			 * liveactivitiesd because MobileKeyBag's MKBEventsRegister() (unslid
+			 * 0x1b51aa4dc) returns NULL when the "AppleKeyStore" IOService is
+			 * absent -- this kernel's IORegistry has no such provider
+			 * (YUNLUO-GET1 ... AppleKeyStore kr=0xe00002f0, kIOReturnNotFound).
+			 *
+			 * Site, read as raw little-endian words at VA - 0x1c0db0000:
+			 *   0x1c18f64cc  b4000174  cbz  x20, 0x1c18f64f8
+			 *   0x1c18f64d0  f9001674  str  x20, [x19, #0x28]
+			 *   0x1c18f64f8  d4200020  brk  #1
+			 * x20 is the MKBEventsRegister() token.  The success arm at
+			 * 0x1c18f64d0 stores it and returns x19 (self); the token's only
+			 * consumer is the class destructor (0x1c18f64fc), which passes it
+			 * to MKBEventsUnregister() -- a routine whose first instruction is
+			 * `cbz x0`.  NULL is therefore the documented "no event source"
+			 * state, not a half-built object; nothing has to be faked, only the
+			 * PC moves.  (A fabricated non-NULL token would be dereferenced by
+			 * MKBEventsUnregister at [x0], [x0+0x10] and [x0+0x18] -- worse.)
+			 *
+			 * The page offset survives ASLR; the two surrounding words, lr (the
+			 * _Block_release return address) and x20 == 0 are checked too, so a
+			 * different brk #1 cannot match.  Reached only through the cbz: no
+			 * b/bl or branch island in the cache targets 0x1c18f64f8. */
+			if (is_saved_state64(state)) {
+				uint64_t ypc5 = get_saved_state_pc(state);
+				uint64_t ylr5 = saved_state64(state)->lr;
+				uint32_t yw5[2] = { 0, 0 };
+				uint32_t yb5 = 0;
+				if ((ypc5 & 0xfffULL) == 0x4f8ULL &&
+				    (ylr5 & 0xfffULL) == 0x4ccULL &&
+				    saved_state64(state)->x[20] == 0 &&
+				    copyin((user_addr_t)(ypc5 - 0x2cULL), yw5, sizeof(yw5)) == 0 &&
+				    copyin((user_addr_t)ypc5, &yb5, sizeof(yb5)) == 0 &&
+				    yw5[0] == 0xb4000174U &&	/* cbz  x20, +0x2c */
+				    yw5[1] == 0xf9001674U &&	/* str  x20, [x19, #0x28] */
+				    yb5 == 0xd4200020U) {	/* brk  #1 */
+					task_t yt5 = current_task();
+					char *yn5 = (yt5 != TASK_NULL) ?
+					    proc_name_address(get_bsdtask_info(yt5)) : NULL;
+					static unsigned yfix5 = 0;
+					if (yfix5 < 16) {
+						yfix5++;
+						printf("YUNLUO-FIX5 resume %s pc=%llx -> %llx"
+						    " x19=%llx lr=%llx\n",
+						    yn5 ? yn5 : "?",
+						    (unsigned long long)ypc5,
+						    (unsigned long long)(ypc5 - 0x28ULL),
+						    (unsigned long long)saved_state64(state)->x[19],
+						    (unsigned long long)ylr5);
+					}
+					/* Resume on the success arm: str x20,[x19,#0x28] with
+					 * x20 == 0, then mov x0, x19 and the normal epilogue.
+					 * The token (Swift field "mkbEvent") is only ever handed
+					 * to MKBEventsUnregister(), which null-checks it. */
+					set_saved_state_pc(state, ypc5 - 0x28ULL);
+					break;
+				}
+			}
+/*
+ * fb195 FIX5 proposal for osfmk/arm64/sleh.c, case ESR_EC_BRK_AARCH64,
+ * EL0 branch: insert immediately BEFORE the existing
+ *		handle_breakpoint(state, esr);
+ * at line 931 (the one after the fb194 FIX4 block).
+ *
+ * Target: mobileactivationd from 044-76040-038.dmg (iOS 17.7 / 21H461,
+ * UUID 34FCB126-8DEB-32AE-A0C4-FE03970D6DE7).  _main calls
+ * performMigration() at 0x100056148 and takes _main.cold.5 when it returns
+ * false (0x100056168 tbz w21,#0,0x1000563b4).  cold.5 logs
+ * "Migration failed." (main:354) and ends in brk #1 at 0x1001eeac0; the
+ * success fall-through is 0x10005616c (mov x20, x19).
+ *
+ * The trap runs in cold.5's frame, not in main's:
+ *   fp = main_sp - 0x10, [fp] = main_fp = fp + 0x6e0,
+ *   [fp + 8] = return address into main = base + 0x563bc.
+ * Both fp/sp must be restored before jumping back into main.
+ * x19 is dead after the jump: 0x10005616c copies it to x20, x20 is only
+ * passed to objc_release at 0x1000561f4 (nil is safe), and x19 itself is
+ * reloaded at 0x100056190 before any use.  No memory writes are needed.
+ *
+ * Fingerprint (independent of process name and of ASLR):
+ *   - pc & 0xfff == 0xac0, image base = pc - 0x1eeac0 is 4K aligned;
+ *   - instruction at pc == d4200020 (brk #1);
+ *   - instruction at pc - 0x198954 == aa1303f4 (mov x20, x19);
+ *   - [fp] == fp + 0x6e0 and [fp + 8] == pc - 0x198704.
+ * The x1 == "release" observation is residue from objc_release (a selector
+ * name in dyld_shared_cache_arm64.01) and is deliberately NOT required.
+ *
+ * Action: x19 = 0, fp = [fp], sp = fp + 0x10, pc = pc - 0x198954.
+ * Note that x0/x1/x2/x3/x20 are all redefined before use on the success
+ * path; x23 (queue) and x27 (context) are callee-saved across cold.5 and
+ * its helpers.
+ */
+
+			/* fb195 FIX6: mobileactivationd (iOS 17.7 / 21H461) asserts
+			 * after performMigration() fails.  _main.cold.5 logs
+			 * "Migration failed." and executes brk #1 at image offset
+			 * 0x1eeac0; the success fall-through is 0x10005616c
+			 * (main+0x101c).  The trap runs on cold.5's frame, so main's
+			 * fp/sp must be restored.  x19 -> 0 is safe: the target only
+			 * copies it to x20, which is passed to objc_release (nil is
+			 * safe), and x19 is reloaded at 0x100056190. */
+			if (is_saved_state64(state)) {
+				uint64_t y5pc = get_saved_state_pc(state);
+				uint64_t y5base = y5pc - 0x1eeac0ULL;
+				uint64_t y5fp = saved_state64(state)->fp;
+				uint64_t y5fr[2];
+				uint32_t y5brk = 0;
+				uint32_t y5arm = 0;
+				int y5ok = 0;
+				if ((y5pc & 0xfffULL) == 0xac0ULL &&
+				    (y5base & 0xfffULL) == 0 &&
+				    y5base >= 0x100000000ULL &&
+				    y5base < 0x180000000ULL &&
+				    y5fp > 0x100000ULL &&
+				    y5fp < 0x800000000000ULL &&
+				    (y5fp & 0xfULL) == 0 &&
+				    copyin((user_addr_t)y5fp, y5fr,
+				    sizeof(y5fr)) == 0 &&
+				    y5fr[0] == y5fp + 0x6e0ULL &&
+				    y5fr[1] == y5pc - 0x198704ULL &&
+				    copyin((user_addr_t)y5pc, &y5brk,
+				    sizeof(y5brk)) == 0 &&
+				    copyin((user_addr_t)(y5pc - 0x198954ULL),
+				    &y5arm, sizeof(y5arm)) == 0 &&
+				    y5brk == 0xd4200020U &&
+				    y5arm == 0xaa1303f4U) {
+					y5ok = 1;
+				}
+				if (y5ok) {
+					task_t y5t = current_task();
+					char *y5n = (y5t != TASK_NULL) ?
+					    proc_name_address(get_bsdtask_info(y5t)) : NULL;
+					static unsigned yfix6 = 0;
+					if (yfix6 < 16) {
+						yfix6++;
+						printf("YUNLUO-FIX6 resume %s pc=%llx -> %llx"
+						    " fp=%llx sp=%llx lr=%llx\n",
+						    y5n ? y5n : "?",
+						    (unsigned long long)y5pc,
+						    (unsigned long long)(y5pc - 0x198954ULL),
+						    (unsigned long long)y5fp,
+						    (unsigned long long)(y5fp + 0x10ULL),
+						    (unsigned long long)y5fr[1]);
+					}
+					saved_state64(state)->x[19] = 0;
+					set_saved_state_fp(state, y5fr[0]);
+					set_saved_state_sp(state, y5fp + 0x10ULL);
+					set_saved_state_pc(state, y5pc - 0x198954ULL);
+					break;
+				}
+			}
 			handle_breakpoint(state, esr);
 			__builtin_unreachable();
 		}
@@ -1222,6 +1455,10 @@ brk_out:
 #undef MSG_FMT
 }
 
+/* fb164: declared locally the way osfmk/ipc/ipc_importance.c does it, so this
+ * file keeps its osfmk-only include set. */
+extern char *proc_name_address(void *p);
+
 static void
 handle_breakpoint(arm_saved_state_t *state, uint32_t esr __unused)
 {
@@ -1229,6 +1466,138 @@ handle_breakpoint(arm_saved_state_t *state, uint32_t esr __unused)
 	mach_exception_data_type_t codes[2]  = {EXC_ARM_BREAKPOINT};
 	mach_msg_type_number_t     numcodes  = 2;
 
+	boot_progress_user_breakpoint(state, esr);
+
+	/* fb164: every userspace `brk` (__builtin_trap, __os_crash, Swift traps,
+	 * objc exceptions aborting) lands here, and the current boot produces
+	 * SIGTRAP without any .ips on the Data volume.  Record the site once per
+	 * process so the dump names both the process and the exact offset inside
+	 * its main binary.  Bounded to keep the ring readable. */
+	{
+		static unsigned yunluo_trap_logs = 0;
+		if (yunluo_trap_logs < 48 && is_saved_state64(state)) {
+			yunluo_trap_logs++;
+			uint64_t pc = get_saved_state_pc(state);
+			uint64_t lr = saved_state64(state)->lr;
+			uint32_t instr = 0;
+			(void) copyin((user_addr_t)pc, &instr, sizeof(instr));
+			task_t yt = current_task();
+			char *yn = (yt != TASK_NULL) ?
+			    proc_name_address(get_bsdtask_info(yt)) : NULL;
+			arm_saved_state64_t *st64 = saved_state64(state);
+			printf("YUNLUO: brk[%u] pid=%d name=%.20s pc=%llx lr=%llx instr=%08x"
+			    " fp=%llx x0=%llx x1=%llx x2=%llx x3=%llx\n",
+			    yunluo_trap_logs, (yt != TASK_NULL) ? task_pid(yt) : -1,
+			    yn ? yn : "?", (unsigned long long)pc,
+			    (unsigned long long)lr, instr,
+			    (unsigned long long)st64->fp,
+			    (unsigned long long)st64->x[0], (unsigned long long)st64->x[1],
+			    (unsigned long long)st64->x[2], (unsigned long long)st64->x[3]);
+			/* fb175: 40 bytes cut the FBSDisplayMode message exactly at the
+			 * point where the rejected value would start, so widen to 220.
+			 * Fatal helpers carry their message in x0 (format) and x1
+			 * (string).  Print it only when the pointer looks like user
+			 * memory and the bytes are printable, so a garbage pointer costs
+			 * nothing and cannot fault the trap path. */
+			for (int yi = 0; yi < 2; yi++) {
+				uint64_t yp = st64->x[yi];
+				char ymsg[221];
+				if (yp < 0x10000ULL || yp > 0x800000000000ULL) {
+					continue;
+				}
+				if (copyin((user_addr_t)yp, ymsg, 220) != 0) {
+					continue;
+				}
+				ymsg[220] = 0;
+				int yok = 1;
+				for (int yj = 0; yj < 220 && ymsg[yj]; yj++) {
+					if (ymsg[yj] < 0x20 || ymsg[yj] > 0x7e) {
+						yok = 0;
+						break;
+					}
+				}
+				if (yok && ymsg[0]) {
+					printf("YUNLUO: brk-str x%d='%s'\n", (int)yi, ymsg);
+					/* fb180: FBSDisplayMode prints its own object
+					 * pointer in the description.  Parse it and
+					 * dump the ivars directly, instead of guessing
+					 * which frame word held the object. */
+					{
+						const char *ykey = "FBSDisplayMode: 0x";
+						const char *yp = NULL;
+						int yk2;
+						for (yk2 = 0; ymsg[yk2]; yk2++) {
+							const char *ya = ykey;
+							const char *yb = &ymsg[yk2];
+							while (*ya && *yb == *ya) {
+								ya++; yb++;
+							}
+							if (*ya == 0) {
+								yp = yb;
+								break;
+							}
+						}
+						if (yp) {
+							uint64_t yval = 0;
+							uint64_t yiv[24];
+							int yq, yd = 0;
+							for (yq = 0; yq < 16 && yp[yq]; yq++) {
+								char yc2 = yp[yq];
+								int yv;
+								if (yc2 >= '0' && yc2 <= '9') {
+									yv = yc2 - '0';
+								} else if (yc2 >= 'a' && yc2 <= 'f') {
+									yv = yc2 - 'a' + 10;
+								} else if (yc2 >= 'A' && yc2 <= 'F') {
+									yv = yc2 - 'A' + 10;
+								} else {
+									break;
+								}
+								yval = (yval << 4) | (uint64_t)yv;
+								yd++;
+							}
+							if (yd >= 6 && yval > 0x100000ULL &&
+							    yval < 0x800000000000ULL &&
+							    copyin((user_addr_t)(yval & ~0xfULL),
+							    yiv, sizeof(yiv)) == 0) {
+								printf("YUNLUO-IVAR obj=%llx",
+								    (unsigned long long)yval);
+								for (yq = 0; yq < 24; yq++) {
+									printf(" [%d]=%llx", yq,
+									    (unsigned long long)yiv[yq]);
+								}
+								printf("\n");
+							}
+						}
+					}
+				}
+			}
+			/* fb174: x0 is the message, not the mode (brk-str prints it), so the
+			 * rejected values have to come from the stack.  Print each frame's
+			 * first 8 words: the saved LR plus the caller's spills and any
+			 * argument pushed for the format.  fb173's object dump is gone --
+			 * it would only have re-read the format string. */
+			{
+				uint64_t yfp = st64->fp;
+				for (int yk = 0; yk < 6 && yfp > 0x10000ULL &&
+				    yfp < 0x800000000000ULL; yk++) {
+					uint64_t yframe[10];
+					int yj;
+					if (copyin((user_addr_t)yfp, yframe, sizeof(yframe)) != 0) {
+						break;
+					}
+					printf("YUNLUO: brk-fp[%d] ra=%llx", yk,
+					    (unsigned long long)yframe[1]);
+					for (yj = 0; yj < 10; yj++) {
+						printf(" w%u=%llx", yj,
+						    (unsigned long long)yframe[yj]);
+					}
+					printf("\n");
+					yfp = yframe[0];
+				}
+			}
+		}
+	}
 #if __has_feature(ptrauth_calls)
 	if (ESR_EC(esr) == ESR_EC_BRK_AARCH64 &&
 	    brk_comment_is_ptrauth(ISS_BRK_COMMENT(esr))) {
@@ -1672,6 +2041,7 @@ handle_user_abort(arm_saved_state_t *state, uint32_t esr, vm_offset_t fault_addr
 	}
 #endif /* __has_feature(ptrauth_calls) */
 
+	boot_progress_user_abort(state, esr, fault_addr);
 	if (user_fault_in_self_restrict_mode(thread) &&
 	    task_is_jit_exception_fatal(get_threadtask(thread))) {
 		extern int exit_with_jit_exception(proc_t p);
@@ -2111,6 +2481,7 @@ sleh_irq(arm_saved_state_t *state)
 
 
 	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
+	boot_progress_irq(get_saved_state_pc(state), get_saved_state_cpsr(state), get_saved_state_sp(state));
 
 #if USE_APPLEARMSMP
 	PE_handle_ext_interrupt();

@@ -35,6 +35,9 @@
 #include <libkern/c++/OSLib.h>
 #include <libkern/c++/OSSharedPtr.h>
 
+/* Reusable caller-chain diagnostics for the yunluo bring-up. */
+#include "../../osfmk/kern/yunluo_diag.h"
+
 #define super OSIterator
 
 OSDefineMetaClassAndStructors(OSCollectionIterator, OSIterator)
@@ -42,6 +45,16 @@ OSDefineMetaClassAndStructors(OSCollectionIterator, OSIterator)
 bool
 OSCollectionIterator::initWithCollection(const OSCollection *inColl)
 {
+	/* NULL is legal input (the checks below return false); only a
+	 * non-NULL pointer outside the kernel VA range is corruption. */
+	if (inColl && ((uintptr_t)inColl < 0xffff000000000000ULL)) {
+		void *bt[YUNLUO_BT_MAX];
+		yunluo_bt_collect(bt, YUNLUO_BT_MAX);
+		kprintf("YUNLUO: bad coll %p " YUNLUO_BT_FMT "\n",
+		    inColl, bt[0], bt[1], bt[2], bt[3], bt[4], bt[5],
+		    bt[6], bt[7]);
+		return false;
+	}
 	if (!super::init() || !inColl) {
 		return false;
 	}
@@ -57,6 +70,18 @@ OSCollectionIterator::initWithCollection(const OSCollection *inColl)
 OSSharedPtr<OSCollectionIterator>
 OSCollectionIterator::withCollection(const OSCollection *inColl)
 {
+	/* Check in the direct caller's frame: bt[0] here is the kext that
+	 * called withCollection.  NULL is legal and falls through to
+	 * initWithCollection, which returns false. */
+	if (inColl && ((uintptr_t)inColl < 0xffff000000000000ULL)) {
+		void *bt[YUNLUO_BT_MAX];
+		yunluo_bt_collect(bt, YUNLUO_BT_MAX);
+		kprintf("YUNLUO: withCollection bad %p " YUNLUO_BT_FMT "\n",
+		    inColl, bt[0], bt[1], bt[2], bt[3], bt[4], bt[5],
+		    bt[6], bt[7]);
+		return nullptr;
+	}
+
 	OSSharedPtr<OSCollectionIterator> me = OSMakeShared<OSCollectionIterator>();
 
 	if (me && !me->initWithCollection(inColl)) {

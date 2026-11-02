@@ -84,8 +84,12 @@
 
 #include <arm64/proc_reg.h>
 #include <pexpert/arm64/boot.h>
+#if XNU_MONITOR_ANS2_SART
 #include <arm64/ppl/sart.h>
+#endif
+#if XNU_MONITOR_UAT_PPL
 #include <arm64/ppl/uat.h>
+#endif
 
 #if defined(KERNEL_INTEGRITY_KTRR) || defined(KERNEL_INTEGRITY_CTRR)
 #include <arm64/amcc_rorgn.h>
@@ -882,6 +886,8 @@ PMAP_SUPPORT_PROTOTYPES(
 	arm_force_fast_fault, (ppnum_t ppnum,
 	vm_prot_t allow_mode,
 	int options), ARM_FORCE_FAST_FAULT_INDEX);
+
+MARK_AS_PMAP_TEXT static void pmap_phys_write_disable(vm_address_t va);
 
 MARK_AS_PMAP_TEXT static boolean_t
 arm_force_fast_fault_with_flush_range(
@@ -2267,13 +2273,17 @@ pmap_bootstrap(
 	/**
 	 * Bootstrap any necessary UAT data structures and values needed from the device tree.
 	 */
+#if XNU_MONITOR_UAT_PPL
 	uat_bootstrap();
+#endif
 
 
 	/**
 	 * Bootstrap any necessary SART data structures and values needed from the device tree.
 	 */
+#if XNU_MONITOR_ANS2_SART
 	sart_bootstrap();
+#endif
 
 	/**
 	 * Don't make any assumptions about the alignment of avail_start before this
@@ -4809,13 +4819,13 @@ pmap_page_protect_options_with_flush_range(
 		if (pvh_ptep_is_iommu(pte_p)) {
 #if XNU_MONITOR
 			if (__improbable(pvh_flags & PVH_FLAG_LOCKDOWN_MASK)) {
-				panic("pmap_page_protect: ppnum 0x%x locked down, cannot be owned by iommu %p, pve_p=%p",
-				    ppnum, ptep_get_iommu(pte_p), pve_p);
+				panic("pmap_page_protect: ppnum 0x%x locked down, cannot be owned by iommu ptep %p, pve_p=%p",
+				    ppnum, pte_p, pve_p);
 			}
 #endif
 			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
-				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu %p, pve_p=%p",
-				    ppnum, ptep_get_iommu(pte_p), pve_p);
+				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu ptep %p, pve_p=%p",
+				    ppnum, pte_p, pve_p);
 			}
 			goto protect_skip_pve_pass1;
 		}
@@ -7053,7 +7063,9 @@ void
 pmap_sync_page_attributes_phys(
 	ppnum_t pp)
 {
-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
+	/* ptoa() widens before the shift: pp << PAGE_SHIFT is a 32-bit shift and drops the high bits of physical
+	 * addresses at or above 4 GiB (all of DRAM on boards whose memory starts there), which phystokv() then rejects. */
+	flush_dcache((vm_offset_t) ptoa(pp), PAGE_SIZE, TRUE);
 }
 
 #if CONFIG_COREDUMP
@@ -12026,6 +12038,7 @@ pmap_unpin_kernel_pages(vm_offset_t kva __unused, size_t nbytes __unused)
 #endif /* !XNU_MONITOR */
 
 
+#if PMAP_CS_PPL_MONITOR || PMAP_CS_INCLUDE_CODE_SIGNING
 MARK_AS_PMAP_TEXT static inline void
 pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 {
@@ -12045,6 +12058,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
 	pmap_ppl_unlockdown_pages(kva, size, 0, ppl_writable);
 #endif
 }
+
+#endif /* PMAP_CS_PPL_MONITOR || PMAP_CS_INCLUDE_CODE_SIGNING */
 
 /**
  * Perform basic validation checks on the destination only and

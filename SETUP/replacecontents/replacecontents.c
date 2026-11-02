@@ -28,6 +28,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <err.h>
+#include <libc.h>
 #include <sysexits.h>
 
 #include <sys/stat.h>

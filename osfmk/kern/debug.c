@@ -1022,6 +1022,27 @@ panic(const char *str, ...)
 {
 	va_list panic_str_args;
 
+	/* yunluo: an OOM panic dies inside the paniclog builder before the later
+	 * flush hook runs (expdbxnu17: text never reached the ring, no marker).
+	 * Put the raw string into the console ring and flush to expdb here,
+	 * before any paniclog allocation.  Weak: images without the driver skip. */
+	{
+		extern void yunluo_log_append(const char *c, int size) __attribute__((weak_import));
+		extern void yunluo_panic_flush(void) __attribute__((weak_import));
+		if (yunluo_log_append != NULL && str != NULL) {
+			int panic_len = 0;
+			while (panic_len < 256 && str[panic_len] != '\0') {
+				panic_len++;
+			}
+			yunluo_log_append("panic-entry: ", 14);
+			yunluo_log_append(str, panic_len);
+			yunluo_log_append("\n", 1);
+			if (yunluo_panic_flush != NULL) {
+				yunluo_panic_flush();
+			}
+		}
+	}
+
 	va_start(panic_str_args, str);
 	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, 0, NULL, (unsigned long)(char *)__builtin_return_address(0));
 	va_end(panic_str_args);
@@ -1368,6 +1389,18 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 #pragma clang diagnostic pop
 		}
 		paniclog_append_noflush("\n");
+
+		/*
+		 * yunluo: the panic text above went through consdebug_putc, so it is
+		 * already in the console ring that the expdb log writer drains.  The
+		 * writer only runs every two seconds and the other CPUs are halted by
+		 * now, so without this the one message that matters would never reach
+		 * the medium.  Weak: images without the driver simply skip it.
+		 */
+		extern void yunluo_panic_flush(void) __attribute__((weak_import));
+		if (yunluo_panic_flush) {
+			yunluo_panic_flush();
+		}
 	}
 #if defined(__x86_64__)
 	else if (((debugger_current_op == DBOP_DEBUGGER) && debugger_is_panic)) {

@@ -1,3 +1,7 @@
+/* Linux port: compile this IIG source as the kernel header. */
+#ifndef DRIVERKIT_PRIVATE
+#define DRIVERKIT_PRIVATE 1
+#endif
 /*
  * Copyright (c) 2019-2019 Apple Inc. All rights reserved.
  *
@@ -49,7 +53,7 @@
  * IOBufferMemoryDescriptor can be handed to any API that expects an IOMemoryDescriptor.
  */
 
-class KERNEL IOBufferMemoryDescriptor : public IOMemoryDescriptor
+class IOBufferMemoryDescriptor : public IOMemoryDescriptor
 {
 public:
 
@@ -83,7 +87,7 @@ public:
      * @return      kIOReturnSuccess on success. See IOReturn.h for error codes.
      */
 	kern_return_t
-	GetAddressRange(IOAddressSegment * range) LOCALONLY;
+	GetAddressRange(IOAddressSegment * range) ;
 
     /*!
      * @brief       Set the valid length of the memory buffer.

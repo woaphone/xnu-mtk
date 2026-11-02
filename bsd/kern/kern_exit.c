@@ -1,3 +1,4 @@
+#include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
  *
@@ -1694,6 +1695,14 @@ _proc_is_fatal_reason(os_reason_t reason)
 
 static TUNABLE(bool, panic_on_crash_disabled, "panic_on_crash_disabled", false);
 
+char yunluo_exit_first[96];
+char yunluo_exit_note[96];
+volatile unsigned yunluo_exit_count;
+extern volatile char yunluo_write_last[128];
+
+static bool
+proc_should_trigger_panic(proc_t p, int rv);
+
 static bool
 proc_should_trigger_panic(proc_t p, int rv)
 {
@@ -1819,6 +1828,30 @@ proc_crash_coredump(proc_t p)
 static void
 proc_handle_critical_exit(proc_t p, int rv)
 {
+	/* yunluo fb162: record why a process died BEFORE the panic gate.
+	 * panic_on_crash_disabled makes the gate return immediately, so the
+	 * os_reason never reached the console and every log showed only
+	 * "exited due to SIGTRAP" without the ObjC exception behind it.
+	 * exit_reason_get_string_desc() decodes the kcdata blob holding it. */
+	{
+		static unsigned yunluo_reason_logs = 0;
+		if (yunluo_reason_logs < 40) {
+			yunluo_reason_logs++;
+			os_reason_t r = p->p_exit_reason;
+			const char *desc = (r != OS_REASON_NULL) ? exit_reason_get_string_desc(r) : NULL;
+			if (r == OS_REASON_NULL) {
+				printf("YUNLUO: exit[%u] pid=%d name=%.20s sig=%d st=%d reason=NONE\n",
+				    yunluo_reason_logs, proc_getpid(p), p->p_name,
+				    WTERMSIG(rv), WEXITSTATUS(rv));
+			} else {
+				printf("YUNLUO: exit[%u] pid=%d name=%.20s sig=%d st=%d ns=%d code=0x%llx flags=0x%llx desc='%s'\n",
+				    yunluo_reason_logs, proc_getpid(p), p->p_name,
+				    WTERMSIG(rv), WEXITSTATUS(rv), r->osr_namespace, r->osr_code,
+				    r->osr_flags, desc ? desc : "none");
+			}
+		}
+	}
+
 	if (!proc_should_trigger_panic(p, rv)) {
 		// No panic, bail out
 		return;
@@ -1835,6 +1868,16 @@ proc_handle_critical_exit(proc_t p, int rv)
 
 	char *exit_reason_desc = exit_reason_get_string_desc(p->p_exit_reason);
 
+	/* yunluo: record every critical exit; the panic text quotes the first. */
+	snprintf(yunluo_exit_note, sizeof(yunluo_exit_note),
+	    "%s[%d] sig=%d st=%d cs=0x%x", p->p_name, proc_getpid(p),
+	    WTERMSIG(rv), WEXITSTATUS(rv), proc_getcsflags(p));
+	printf("YUNLUO: critical exit %s reason=%s\n", yunluo_exit_note,
+	    exit_reason_desc ? exit_reason_desc : "none");
+	if (yunluo_exit_count++ == 0) {
+		strlcpy(yunluo_exit_first, yunluo_exit_note, sizeof(yunluo_exit_first));
+	}
+
 	if (p->p_exit_reason == OS_REASON_NULL) {
 		printf("pid %d exited -- no exit reason available -- (signal %d, exit %d)\n",
 		    proc_getpid(p), WTERMSIG(rv), WEXITSTATUS(rv));
@@ -1845,7 +1888,11 @@ proc_handle_critical_exit(proc_t p, int rv)
 	}
 
 	const char *prefix_str;
+#if defined(XNU_BOOT_PROGRESS) && XNU_BOOT_PROGRESS
+	char prefix_str_buf[1024];
+#else
 	char prefix_str_buf[128];
+#endif
 
 	if (p == initproc) {
 		if (strnstr(p->p_name, "preinit", sizeof(p->p_name))) {
@@ -1858,7 +1905,22 @@ proc_handle_critical_exit(proc_t p, int rv)
 	} else {
 		/* For processes that aren't launchd, just use the process name and pid */
 		snprintf(prefix_str_buf, sizeof(prefix_str_buf), "%s[%d] exited", p->p_name, proc_getpid(p));
+		boot_progress_critical_exit(proc_getpid(p), prefix_str_buf, sizeof(prefix_str_buf));
 		prefix_str = prefix_str_buf;
+	}
+
+	/*
+	 * yunluo bring-up: the console is the only output device and the panic
+	 * text would cover the diagnostics of the failing stage at once. Keep
+	 * the screen alive for 40 s so the driver's snapshot thread can dump
+	 * the root-volume probes first.
+	 */
+	if (p == initproc) {
+		uint32_t yunluo_wait = 40;
+		printf("YUNLUO: %s; holding %u s for diagnostics before the panic\n",
+		    prefix_str, yunluo_wait);
+		assert_wait_timeout((event_t)&yunluo_wait, THREAD_UNINT, yunluo_wait, NSEC_PER_SEC);
+		thread_block(THREAD_CONTINUE_NULL);
 	}
 
 	proc_crash_coredump(p);
@@ -1866,13 +1928,16 @@ proc_handle_critical_exit(proc_t p, int rv)
 	sync(p, (void *)NULL, (int *)NULL);
 
 	if (p->p_exit_reason == OS_REASON_NULL) {
-		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC, "%s -- no exit reason available -- (signal %d, exit status %d %s)",
-		    prefix_str, WTERMSIG(rv), WEXITSTATUS(rv), ((proc_getcsflags(p) & CS_KILLED) ? "CS_KILLED" : ""));
+		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC,
+		    "%s st=%d sig=%d cs=0x%x first=[%s] last='%.60s'",
+		    prefix_str, WEXITSTATUS(rv), WTERMSIG(rv), proc_getcsflags(p),
+		    yunluo_exit_first, (const char *)yunluo_write_last);
 	} else {
-		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC, "%s %s -- exit reason namespace %d subcode 0x%llx description: %." LAUNCHD_PANIC_REASON_STRING_MAXLEN "s",
-		    ((proc_getcsflags(p) & CS_KILLED) ? "CS_KILLED" : ""),
+		panic_with_options(0, NULL, DEBUGGER_OPTION_INITPROC_PANIC,
+		    "%s ns=%d code=0x%llx desc=%.80s last='%.60s'",
 		    prefix_str, p->p_exit_reason->osr_namespace, p->p_exit_reason->osr_code,
-		    exit_reason_desc ? exit_reason_desc : "none");
+		    exit_reason_desc ? exit_reason_desc : "none",
+		    (const char *)yunluo_write_last);
 	}
 }
 
@@ -1891,6 +1956,35 @@ proc_prepareexit(proc_t p, int rv, boolean_t perf_notify)
 	bool corpse_source = false;
 	task_t task = proc_task(p);
 
+
+	boot_progress_exit(proc_getpid(p),p->p_name,rv,
+	    p->p_exit_reason ? p->p_exit_reason->osr_namespace : 0,
+	    p->p_exit_reason ? p->p_exit_reason->osr_code : 0);
+
+	/* yunluo fb162: every process reaches here, while
+	 * proc_handle_critical_exit() only runs for p_crash_behavior != 0 (never
+	 * set for SpringBoard).  So this is the one place that can report why a
+	 * plain process died -- the ObjC exception behind "sent by exc handler"
+	 * lives in the os_reason's kcdata blob.  Bounded to 60 lines. */
+	{
+		static unsigned yunluo_reason_logs = 0;
+		os_reason_t rr = p->p_exit_reason;
+		bool fatal_signal = WIFSIGNALED(rv) && _proc_is_crashing_signal(WTERMSIG(rv));
+		if (yunluo_reason_logs < 60 && (fatal_signal || rr != OS_REASON_NULL)) {
+			yunluo_reason_logs++;
+			if (rr == OS_REASON_NULL) {
+				printf("YUNLUO: exit[%u] pid=%d name=%.20s sig=%d st=%d reason=NONE\n",
+				    yunluo_reason_logs, proc_getpid(p), p->p_name,
+				    WTERMSIG(rv), WEXITSTATUS(rv));
+			} else {
+				const char *desc = exit_reason_get_string_desc(rr);
+				printf("YUNLUO: exit[%u] pid=%d name=%.20s sig=%d st=%d ns=%d code=0x%llx flags=0x%llx desc='%s'\n",
+				    yunluo_reason_logs, proc_getpid(p), p->p_name,
+				    WTERMSIG(rv), WEXITSTATUS(rv), rr->osr_namespace,
+				    rr->osr_code, rr->osr_flags, desc ? desc : "none");
+			}
+		}
+	}
 
 	if (p->p_crash_behavior != 0 || p == initproc) {
 		proc_handle_critical_exit(p, rv);

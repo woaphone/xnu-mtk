@@ -2039,6 +2039,19 @@ build_signal_reason(int signum, const char *procname)
 static void
 psignal_internal(proc_t p, task_t task, thread_t thread, int flavor, int signum, os_reason_t signal_reason)
 {
+	/* yunluo fb161: fatal SIGTRAP produces no crash report on this port
+	 * ("exited due to SIGTRAP | sent by exc handler"), so record which process
+	 * it hit and when.  Bounded: a storm must not flood the console ring.
+	 * The fault PC is not read here (arm64 keeps it in the exception path). */
+	if (signum == SIGTRAP) {
+		static unsigned yunluo_trap_logs = 0;
+		if (yunluo_trap_logs < 32) {
+			yunluo_trap_logs++;
+			printf("YUNLUO: SIGTRAP pid=%d name=%.20s flavor=%d trap#=%u\n",
+			    proc_getpid(p), p->p_name, flavor, yunluo_trap_logs);
+		}
+	}
+
 	int prop;
 	user_addr_t action = USER_ADDR_NULL;
 	proc_t                  sig_proc;

@@ -558,9 +558,12 @@ cpu_signal_cancel(cpu_data_t *target_proc)
 	}
 }
 
+extern void yunluo_paint_band(int band, unsigned int color);
+
 void
 cpu_signal_handler(void)
 {
+	yunluo_paint_band(4, 0xFF00FFFF);   /* cyan: IPI handler ran */
 	cpu_signal_handler_internal(FALSE);
 }
 

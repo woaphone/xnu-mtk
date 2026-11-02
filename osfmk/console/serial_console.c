@@ -1,3 +1,4 @@
+#include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2020 Apple, Inc. All rights reserved.
  *
@@ -156,6 +157,119 @@ static bool console_suspended = false;
  */
 int disableConsoleOutput;
 
+/* ---------------------------------------------------------------------------
+ * yunluo: console byte ring for the expdb log window
+ * ---------------------------------------------------------------------------
+ * The panel is the only console this port has, so a panic repaints it and the
+ * boot log is gone.  Every byte that would have gone to the panel is copied
+ * into this ring, and kits/yunluo/BootLog.c drains it onto expdb every couple
+ * of seconds; a reader then recovers the whole boot, panic text included, from
+ * the medium.
+ *
+ * The copy has to happen before the disableConsoleOutput / console_io_allowed
+ * gates in console_write() and console_write_unbuffered(), because those
+ * return without touching the hardware.  It is deliberately allocation-free,
+ * lock-free and never blocks: console_write_unbuffered() is called one
+ * character at a time by kprintf() with interrupts disabled and the kprintf
+ * spinlock held, and console_write() can run inside the PPL, so anything that
+ * sleeps or allocates here would deadlock the thing we are trying to capture.
+ * A full ring drops bytes rather than waiting.
+ */
+#define YUNLUO_LOG_RING_SIZE (512u * 1024u)   /* power of two: masking, no divide */
+#define YUNLUO_LOG_RING_MASK (YUNLUO_LOG_RING_SIZE - 1u)
+static char yunluo_log_ring[YUNLUO_LOG_RING_SIZE];
+static uint64_t yunluo_log_total;             /* bytes ever appended */
+static uint32_t yunluo_log_wrap;
+
+uint64_t yunluo_log_position(void);
+uint32_t yunluo_log_copy(uint64_t *pos, char *out, uint32_t max);
+
+/*
+ * Hot path: console_write() calls this once per line, and
+ * console_write_unbuffered() calls it once per character from kprintf() with
+ * interrupts off and the kprintf spinlock held.  Everything here is a plain
+ * store plus one atomic add; there is deliberately no lock, no allocation and
+ * no division.
+ */
+void
+yunluo_log_append(const char *c, int size)
+{
+	if (size <= 0) {
+		return;
+	}
+	/* One call can carry a whole console line buffer.  Cap it so a huge print
+	 * cannot spend a long time here while kprintf holds its spinlock with
+	 * interrupts off -- and account for exactly what was copied, so the reader
+	 * never sees a gap that is not real. */
+	if (size > 4096) {
+		size = 4096;
+	}
+	uint64_t at = __atomic_fetch_add(&yunluo_log_total, (uint64_t)size,
+	    __ATOMIC_RELAXED);
+	if (at + (uint64_t)size > YUNLUO_LOG_RING_SIZE) {
+		/* Record that at least one gap exists so the reader can say so. */
+		yunluo_log_wrap = 1;
+	}
+	uint32_t idx = (uint32_t)at & YUNLUO_LOG_RING_MASK;
+	for (int i = 0; i < size; i++) {
+		yunluo_log_ring[idx] = c[i];
+		idx = (idx + 1u) & YUNLUO_LOG_RING_MASK;
+	}
+}
+
+/* Total bytes ever appended; a reader uses it to notice a gap. */
+uint64_t
+yunluo_log_position(void)
+{
+	return __atomic_load_n(&yunluo_log_total, __ATOMIC_RELAXED);
+}
+
+/* Bytes lost to the ring wrapping, as a rough gap hint. */
+uint32_t
+yunluo_log_wrapped(void)
+{
+	return __atomic_load_n(&yunluo_log_wrap, __ATOMIC_RELAXED);
+}
+
+/*
+ * How much of the ring is live, and where it starts.  A writer that wants the
+ * whole log rather than "what is new" uses this: it returns the last
+ * min(total, ring size) bytes and sets *start to the offset of the first one.
+ */
+uint32_t
+yunluo_log_available(uint64_t *start)
+{
+	uint64_t total = __atomic_load_n(&yunluo_log_total, __ATOMIC_RELAXED);
+	uint64_t s = total > YUNLUO_LOG_RING_SIZE ? total - YUNLUO_LOG_RING_SIZE : 0;
+	if (start) {
+		*start = s;
+	}
+	return (uint32_t)(total - s);
+}
+
+/*
+ * Copy console bytes [*pos, total) into out, at most max.  A reader that fell
+ * further behind than the ring is slid forward and told by the return value
+ * being short of what it asked for.  *pos advances by what was copied.
+ */
+uint32_t
+yunluo_log_copy(uint64_t *pos, char *out, uint32_t max)
+{
+	uint64_t total = __atomic_load_n(&yunluo_log_total, __ATOMIC_RELAXED);
+	if (total - *pos > YUNLUO_LOG_RING_SIZE) {
+		*pos = total - YUNLUO_LOG_RING_SIZE;
+	}
+	uint64_t avail = total - *pos;
+	uint32_t n = (uint32_t)(avail < (uint64_t)max ? avail : (uint64_t)max);
+	uint32_t idx = (uint32_t)(*pos) & YUNLUO_LOG_RING_MASK;
+	for (uint32_t i = 0; i < n; i++) {
+		out[i] = yunluo_log_ring[idx];
+		idx = (idx + 1u) & YUNLUO_LOG_RING_MASK;
+	}
+	*pos += n;
+	return n;
+}
+
 /**
  * Enforce policies around when console I/O is allowed. Most importantly about
  * not performing console I/O while interrupts are disabled (which can cause
@@ -251,6 +365,7 @@ get_cons_ops_index(void)
 static inline void
 _cnputc(char c, bool poll)
 {
+	if (boot_progress_active()) { boot_progress_putc(c); return; }
 	bool in_debugger = (kernel_debugger_entry_count > 0);
 	const uint32_t idx = get_cons_ops_index();
 
@@ -523,6 +638,9 @@ console_resume()
 void
 console_write(char *str, int size)
 {
+	/* Record what the panel is about to show, before any gate can drop it. */
+	yunluo_log_append(str, size);
+
 	if (disableConsoleOutput) {
 		return;
 	}
@@ -608,6 +726,9 @@ console_write(char *str, int size)
 void
 console_write_unbuffered(char c)
 {
+	/* kprintf() comes this way one character at a time; record it too. */
+	yunluo_log_append(&c, 1);
+
 	if (disableConsoleOutput) {
 		return;
 	}

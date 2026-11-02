@@ -1,3 +1,4 @@
+#include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
@@ -183,7 +184,7 @@
 
 #include "kern_exec_internal.h"
 
-#include <CodeSignature/Entitlements.h>
+#include <CoreEntitlements/CoreEntitlements.h>
 
 #include <mach/exclaves.h>
 
@@ -1186,6 +1187,7 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
  *		activators should not be given the opportunity to attempt
  *		to activate the image.
  */
+
 static int
 exec_mach_imgact(struct image_params *imgp)
 {
@@ -1343,7 +1345,9 @@ grade:
 	/*
 	 * Actually load the image file we previously decided to load.
 	 */
+	boot_progress_process_stage(proc_getpid(p),p->p_name,"exec load_machfile enter");
 	lret = load_machfile(imgp, mach_header, thread, &map, &load_result);
+	boot_progress_process_stage(proc_getpid(p),p->p_name,"exec load_machfile returned");
 	if (lret != LOAD_SUCCESS) {
 		error = load_return_to_errno(lret);
 
@@ -2234,6 +2238,14 @@ exec_activate_image(struct image_params *imgp)
 	if (error) {
 		goto bad_notrans;
 	}
+
+	/*
+	 * yunluo: when the boot-arg is set, a Data-side replacement for the
+	 * mobileactivationd binary takes the place of the sealed one.  The
+	 * replacement lives on the writable Data volume, so it can be changed
+	 * without touching the System volume; AMFI still validates whatever
+	 * image is loaded there.
+	 */
 
 	/* Use excpath, which contains the copyin-ed exec path */
 	DTRACE_PROC1(exec, uintptr_t, excpath);
@@ -7013,8 +7025,341 @@ create_unix_stack(vm_map_t map, load_result_t* load_result,
  *		word width of the kernel. Once the self-exec completes, the
  *		initproc might be different.
  */
+#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
+#if !DEVELOPMENT && !DEBUG
+#error The offline owner cache mount is a development instrument
+#endif
+extern int native_verified_block_volume_device(const char *, dev_t *, char *, size_t);
+#if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
+extern int native_owner_publish_boot_manifest(dev_t, const char *, dev_t, const char *);
+#endif
+#if defined(XNU_OWNER_CACHE_STARTUP) && XNU_OWNER_CACHE_STARTUP
+extern void commpage_update_dyld_flags(uint64_t);
+volatile uint64_t native_owner_cache_dyld_flags = 0;
+#endif
+extern int native_verified_block_root_authorized(dev_t);
+volatile int native_owner_cache_stage = 0;
+volatile int native_owner_cache_status = -1;
+volatile int native_owner_cache_mount_status = -1;
+volatile int native_owner_cache_readonly = 0;
+volatile int native_owner_cache_authorized = 0;
+volatile int native_owner_cache_root_recheck = 0;
+volatile uint64_t native_owner_cache_actual_mount_flags = 0;
+volatile uintptr_t native_owner_cache_original_root = 0;
+volatile uintptr_t native_owner_cache_current_root = 0;
+volatile int native_owner_cache_native_union = 0;
+volatile dev_t native_owner_cache_selected_device = NODEV;
+volatile dev_t native_owner_cache_mounted_device = NODEV;
+char native_owner_cache_device_path[64];
+void native_owner_cache_checkpoint(int, int);
+__attribute__((noinline)) void
+native_owner_cache_checkpoint(int status, int authorized)
+{
+	__asm__ volatile("" : : "r"(status), "r"(authorized) : "memory");
+}
+
 static int
-load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
+native_owner_cache_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp)
+{
+	const char *volume = "8846FE78-2910-4297-AF97-D59BB6F8FC16";
+#if defined(XNU_OWNER_UNION_SYSTEMOS) && XNU_OWNER_UNION_SYSTEMOS
+#if !CONFIG_UNION_MOUNTS
+#error The owner composition requires the original native union-mount implementation
+#endif
+	const char *mountpoint = "/";
+#else
+	const char *mountpoint = "/private/preboot";
+#endif
+#if !defined(XNU_OWNER_UNION_SYSTEMOS) || !XNU_OWNER_UNION_SYSTEMOS
+	const char *environment = "DYLD_SHARED_CACHE_DIR=/private/preboot/System/Library/Caches/com.apple.dyld";
+#endif
+	vnode_t original_os_root = rootvnode;
+	native_owner_cache_original_root = (uintptr_t)original_os_root;
+	mount_t root_mount = vnode_mount(original_os_root);
+	vnode_t device_vnode = vfs_devvp(root_mount);
+	dev_t root_device = device_vnode ? vnode_specrdev(device_vnode) : NODEV;
+	dev_t selected = NODEV;
+	vnode_t mounted_root = NULLVP;
+	int error = EAUTH, root_authorized = 0, cache_authorized = 0;
+	int32_t result = 0;
+	user64_addr_t spec = scratch + 0x160;
+	char device_path[64] = {0};
+	uint8_t mount_data[0x150] = {0};
+	uint64_t mount_flags = MNT_RDONLY;
+	uint16_t mount_mode = 1;
+	uint32_t anonymous_owner = 99;
+#if !defined(XNU_OWNER_UNION_SYSTEMOS) || !XNU_OWNER_UNION_SYSTEMOS
+#if defined(XNU_OWNER_CRYPTEX_FILES) && XNU_OWNER_CRYPTEX_FILES
+	const char *fallback = "DYLD_FALLBACK_LIBRARY_PATH=/private/preboot/usr/lib";
+	user64_addr_t environment_vector[3] = {scratch + 0x400, scratch + 0x600, USER_ADDR_NULL};
+#else
+	user64_addr_t environment_vector[2] = {scratch + 0x400, USER_ADDR_NULL};
+#endif
+#endif
+	struct mount_args request = {.type = scratch + 0x100, .path = scratch + 0x120,
+	    .flags = MNT_RDONLY, .data = scratch + 0x200};
+	request.flags = (int)mount_flags;
+#if defined(XNU_OWNER_UNION_SYSTEMOS) && XNU_OWNER_UNION_SYSTEMOS
+	request.flags |= MNT_UNION;
+#endif
+	if (device_vnode) vnode_put(device_vnode);
+	root_authorized = (vfs_flags(root_mount) & MNT_RDONLY) && root_device != NODEV &&
+	    native_verified_block_root_authorized(root_device);
+	if (!root_authorized) goto done;
+	native_owner_cache_stage = 1;
+	if (!native_verified_block_volume_device(volume, &selected, device_path,
+	    sizeof(device_path))) goto done;
+	strlcpy(native_owner_cache_device_path, device_path, sizeof(native_owner_cache_device_path));
+	native_owner_cache_selected_device = selected;
+	native_owner_cache_stage = 2;
+	/* Exact user-mount payload already qualified against this original APFS. */
+	memcpy(mount_data, &spec, sizeof(spec));
+	memcpy(mount_data + 8, &mount_flags, sizeof(mount_flags));
+	memcpy(mount_data + 16, &mount_mode, sizeof(mount_mode));
+	memcpy(mount_data + 0x144, &anonymous_owner, sizeof(anonymous_owner));
+	memcpy(mount_data + 0x148, &anonymous_owner, sizeof(anonymous_owner));
+	if ((error = copyout("apfs", request.type, 5)) != 0 ||
+	    (error = copyout(mountpoint, request.path, strlen(mountpoint) + 1)) != 0 ||
+	    (error = copyout(device_path, spec, strlen(device_path) + 1)) != 0 ||
+	    (error = copyout(mount_data, request.data, sizeof(mount_data))) != 0) goto done;
+	native_owner_cache_stage = 3;
+	error = mount(p, &request, &result);
+	native_owner_cache_mount_status = error;
+	if (error) goto done;
+	native_owner_cache_stage = 4;
+	error = vnode_lookup(mountpoint, 0, &mounted_root, vfs_context_current());
+	if (error) goto done;
+	mount_t cache_mount = vnode_mount(mounted_root);
+	device_vnode = vfs_devvp(cache_mount);
+	dev_t actual = device_vnode ? vnode_specrdev(device_vnode) : NODEV;
+	if (device_vnode) vnode_put(device_vnode);
+	native_owner_cache_mounted_device = actual;
+	int readonly = (vfs_flags(cache_mount) & MNT_RDONLY) != 0;
+	native_owner_cache_readonly = readonly;
+	native_owner_cache_actual_mount_flags = vfs_flags(cache_mount);
+	native_owner_cache_current_root = (uintptr_t)rootvnode;
+	int native_union = (vfs_flags(cache_mount) & MNT_UNION) &&
+	    vnode_mountedhere(original_os_root) == cache_mount && rootvnode == mounted_root;
+	native_owner_cache_native_union = native_union;
+	cache_authorized = readonly && actual == selected &&
+	    !strcmp(vfs_statfs(cache_mount)->f_fstypename, "apfs") && native_verified_block_root_authorized(actual);
+#if defined(XNU_OWNER_UNION_SYSTEMOS) && XNU_OWNER_UNION_SYSTEMOS
+	cache_authorized = cache_authorized && native_union;
+#endif
+	if (!cache_authorized) { error = EAUTH; goto done; }
+	native_owner_cache_stage = 5;
+#if !defined(XNU_OWNER_UNION_SYSTEMOS) || !XNU_OWNER_UNION_SYSTEMOS
+	if ((error = copyout(environment, environment_vector[0], strlen(environment) + 1)) != 0 ||
+	    (error = copyout(environment_vector, scratch + 0x500, sizeof(environment_vector))) != 0) goto done;
+#if defined(XNU_OWNER_CRYPTEX_FILES) && XNU_OWNER_CRYPTEX_FILES
+	if ((error = copyout(fallback, scratch + 0x600, strlen(fallback) + 1)) != 0) goto done;
+#endif
+	*envp = scratch + 0x500;
+#else
+	*envp = USER_ADDR_NULL;
+#endif
+	native_owner_cache_stage = 6;
+done:
+	if (mounted_root) vnode_put(mounted_root);
+	int root_recheck = root_authorized && native_verified_block_root_authorized(root_device);
+	native_owner_cache_root_recheck = root_recheck;
+	if (!root_recheck) error = EAUTH;
+#if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
+	if (!error && cache_authorized && root_recheck &&
+	    !native_owner_publish_boot_manifest(root_device, "04769D26-2CA0-4825-B443-E2E5F88300F2",
+	        selected, volume)) error = EAUTH;
+#endif
+#if defined(XNU_OWNER_CACHE_STARTUP) && XNU_OWNER_CACHE_STARTUP
+	if (!error && cache_authorized && root_recheck) {
+		/* Original dyld bit 3 selects no ignition; the owner chain and actual
+		 * readonly mounts above supply image authentication in this mode. */
+		dyld_flags |= UINT64_C(8);
+		commpage_update_dyld_flags(dyld_flags);
+		native_owner_cache_dyld_flags = dyld_flags;
+	}
+#endif
+	native_owner_cache_authorized = cache_authorized;
+	native_owner_cache_status = error;
+	native_owner_cache_checkpoint(error, cache_authorized);
+	return error;
+}
+#endif
+
+#if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
+#if !defined(XNU_OWNER_BOOT_MANIFEST) || !XNU_OWNER_BOOT_MANIFEST
+#error Scratch Data mounting requires the authenticated original OS startup path
+#endif
+#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+#ifndef XNU_OWNER_DATA_VOLUME_UUID
+#error Supply the observed scratch volume UUID for the IOKit backend
+#endif
+extern int native_ram_block_volume_seed(const char *, dev_t *, char *, size_t, uint64_t *, uint64_t *, uint8_t *);
+#endif
+extern dev_t mdevlookup(int);
+extern int mdevgetrange(int, uint64_t *, uint64_t *);
+volatile int native_owner_data_status = -1;
+volatile int native_owner_data_stage = 0;
+volatile int native_owner_data_readonly = -1;
+volatile dev_t native_owner_data_device = NODEV;
+uint64_t native_owner_data_seed_base, native_owner_data_seed_size;
+uint8_t native_owner_data_seed_sha256[32];
+char native_owner_data_device_path[64];
+
+/* Boot-time read-only union views of owner-provided GPU addon content over sealed system directories, mounted after the Data mount and
+ * before launchd starts: the Adreno Metal plugin bundle over /System/Library/Extensions (the original Metal discovery loads
+ * /System/Library/Extensions/<MetalPluginName>.bundle) and an owner launchd job over /System/Library/LaunchDaemons (a process outside
+ * every sandbox profile). Only with boot-arg sheng-gpu-addon=1. Never panics: a missing source directory or a refused mount only
+ * records its status. The backing directories are owner Data (not an authenticated immutable volume); code in them still has to
+ * pass AMFI through the loaded trust cache. */
+extern volatile int native_bindfs_boot_mount;
+volatile int native_gpu_addon_stage = 0;
+volatile int native_gpu_addon_status = -1;
+volatile int native_gpu_addon2_stage = 0;
+volatile int native_gpu_addon2_status = -1;
+static void
+native_gpu_addon_mount(proc_t p, user_addr_t scratch, user_addr_t offset, const char *source, size_t source_size,
+    const char *point, size_t point_size, const char *visible, const char *own, volatile int *stage, volatile int *status)
+{
+	vnode_t probe = NULLVP;
+	int error;
+	*stage = 1;
+	error = vnode_lookup(source, 0, &probe, vfs_context_current());
+	if (error) {
+		*status = error;
+		return;
+	}
+	vnode_put(probe);
+	probe = NULLVP;
+	*stage = 2;
+	struct mount_args request = {.type = scratch + offset, .path = scratch + offset + 0x20,
+	    .flags = MNT_RDONLY | MNT_UNION, .data = scratch + offset + 0x100};
+	int32_t result = 0;
+	if ((error = copyout("bindfs", request.type, 7)) || (error = copyout(point, request.path, point_size)) ||
+	    (error = copyout(source, request.data, source_size))) {
+		*status = error;
+		return;
+	}
+	native_bindfs_boot_mount = 1;
+	error = mount(p, &request, &result);
+	native_bindfs_boot_mount = 0;
+	if (error) {
+		*status = error;
+		return;
+	}
+	*stage = 3;
+	/* The union must still show a sealed lower entry next to the owner's. */
+	error = vnode_lookup(visible, 0, &probe, vfs_context_current());
+	if (!error) {
+		vnode_put(probe);
+		probe = NULLVP;
+		*stage = 4;
+		/* ... and the owner's own entry must be visible through it (stage 5). */
+		error = vnode_lookup(own, 0, &probe, vfs_context_current());
+		if (!error) {
+			vnode_put(probe);
+			probe = NULLVP;
+			*stage = 5;
+		}
+	}
+	*status = error;
+}
+static void
+native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+{
+	uint32_t enabled = 0;
+	if (!PE_parse_boot_argn("sheng-gpu-addon", &enabled, sizeof(enabled)) || enabled != 1) {
+		return;
+	}
+	static const char extensions_source[] = "/private/var/ngpu/addons", extensions_point[] = "/System/Library/Extensions";
+	static const char daemons_source[] = "/private/var/ngpu/daemons", daemons_point[] = "/System/Library/LaunchDaemons";
+	native_gpu_addon_mount(p, scratch, 0x400, extensions_source, sizeof(extensions_source), extensions_point,
+	    sizeof(extensions_point), "/System/Library/Extensions/AGXMetalA10.bundle",
+	    "/System/Library/Extensions/NativeAdrenoMetal.bundle/Info.plist", &native_gpu_addon_stage,
+	    &native_gpu_addon_status);
+	native_gpu_addon_mount(p, scratch, 0x600, daemons_source, sizeof(daemons_source), daemons_point, sizeof(daemons_point),
+	    "/System/Library/LaunchDaemons/com.apple.backboardd.plist",
+	    "/System/Library/LaunchDaemons/org.blu-sharky.adrenoprobed.plist", &native_gpu_addon2_stage, &native_gpu_addon2_status);
+}
+
+static int
+native_owner_data_prepare(proc_t p, user_addr_t scratch)
+{
+	uint64_t base = 0, size = 0;
+	dev_t device = NODEV;
+	int error = EINVAL;
+	vnode_t data_root = NULLVP;
+	char device_path[64] = "/dev/md0";
+#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+	/* The typed provider supplies logical seed identity for both dense and
+	 * sparse media. A sparse disk has no contiguous logical-byte address. */
+	if (!native_ram_block_volume_seed(XNU_OWNER_DATA_VOLUME_UUID, &device, device_path,
+	    sizeof(device_path), &base, &size, native_owner_data_seed_sha256)) { error = ENOENT; goto done; }
+	/* The typed provider's disk may be far larger than 2 GiB (a persistent Data disk keeps only its seed's nonzero pages). */
+	if (!size || size > UINT64_C(0x10000000000) || (size & 4095)) goto done;
+#else
+	device = mdevlookup(0);
+	if (device == NODEV || mdevgetrange(0, &base, &size) || base < VM_MIN_KERNEL_ADDRESS ||
+	    !size || size > UINT64_C(0x80000000) || (base & 4095) || (size & 4095)) goto done;
+	SHA256_CTX context;
+	SHA256_Init(&context);
+	SHA256_Update(&context, (const void *)base, size);
+	SHA256_Final(native_owner_data_seed_sha256, &context);
+#endif
+	native_owner_data_seed_base = base;
+	native_owner_data_seed_size = size;
+	native_owner_data_stage = 1;
+	strlcpy(native_owner_data_device_path, device_path, sizeof(native_owner_data_device_path));
+	uint8_t payload[0x150] = {0};
+	user64_addr_t spec = scratch + 0x160;
+	uint16_t mode = 1;
+	uint32_t anonymous_owner = 99;
+	memcpy(payload, &spec, sizeof(spec));
+	memcpy(payload + 16, &mode, sizeof(mode));
+	memcpy(payload + 0x144, &anonymous_owner, sizeof(anonymous_owner));
+	memcpy(payload + 0x148, &anonymous_owner, sizeof(anonymous_owner));
+	struct mount_args request = {.type = scratch + 0x100, .path = scratch + 0x120,
+	    .flags = 0, .data = scratch + 0x200};
+	int32_t result = 0;
+	if ((error = copyout("apfs", request.type, 5)) ||
+	    (error = copyout("/private/var", request.path, 13)) ||
+	    (error = copyout(device_path, spec, strlen(device_path) + 1)) ||
+	    (error = copyout(payload, request.data, sizeof(payload)))) goto done;
+	native_owner_data_stage = 2;
+	error = mount(p, &request, &result);
+	if (error) goto done;
+	native_owner_data_stage = 3;
+	error = vnode_lookup("/private/var", 0, &data_root, vfs_context_current());
+	if (error) goto done;
+	mount_t data_mount = vnode_mount(data_root);
+	vnode_t device_node = vfs_devvp(data_mount);
+	dev_t actual = device_node ? vnode_specrdev(device_node) : NODEV;
+	if (device_node) vnode_put(device_node);
+	native_owner_data_device = actual;
+	native_owner_data_readonly = (vfs_flags(data_mount) & MNT_RDONLY) != 0;
+	if (actual != device || (vfs_flags(data_mount) & MNT_RDONLY) ||
+	    strcmp(vfs_statfs(data_mount)->f_fstypename, "apfs")) error = EINVAL;
+	if (!error) native_owner_data_stage = 4;
+	if (!error) native_gpu_addon_prepare(p, scratch);
+done:
+	if (data_root) vnode_put(data_root);
+	native_owner_data_status = error;
+	return error;
+}
+#endif
+
+/* Persistent breadcrumbs: the console scrolls, so the driver re-prints these
+ * every snapshot instead of relying on one-shot printf lines.
+ * 1=prepare start 2=prepare done 3=execve called 4=execve returned */
+volatile int yunluo_exec_stage;
+volatile int yunluo_exec_errno;
+volatile int yunluo_bind_err = -1;      /* mount("bindfs") result */
+volatile int yunluo_cache_visible = -1; /* dyld's own path resolves? */
+char yunluo_cache_magic[17];            /* first 16 bytes of the cache file */
+volatile int yunluo_cache_read_err = -1;
+char yunluo_preboot_log[192];           /* one line that tells the whole story */
+
+static int
+load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path, user_addr_t envp)
 {
 	int retval[2];
 	int error;
@@ -7086,7 +7431,7 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 */
 	init_exec_args.fname = argv0;
 	init_exec_args.argp = scratch_addr;
-	init_exec_args.envp = USER_ADDR_NULL;
+	init_exec_args.envp = envp;
 
 	/*
 	 * So that init task is set with uid,gid 0 token
@@ -7096,7 +7441,13 @@ load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 	 */
 	set_security_token(p, proc_ucred_unsafe(p));
 
-	return execve(p, &init_exec_args, retval);
+	printf("YUNLUO: execve %s envp=0x%llx\n", path, (unsigned long long)envp);
+	yunluo_exec_stage = 3;
+	error = execve(p, &init_exec_args, retval);
+	yunluo_exec_stage = 4;
+	yunluo_exec_errno = error;
+	printf("YUNLUO: execve returned %d\n", error);
+	return error;
 }
 
 static const char * init_programs[] = {
@@ -7138,9 +7489,778 @@ static const char * init_programs[] = {
  * 3		2		NA		/usr/appleinternal/sbin/launchd.development
  * 4		3		1		/sbin/launchd
  */
+#if defined(YUNLUO_PREBOOT_MOUNT)
+extern char yunluo_cryptex_dev[32];
+extern volatile int yunluo_cryptex_dev_ready;
+extern void IOSleep(unsigned int);
+extern volatile int native_bindfs_boot_mount;
+extern bool yunluo_publish_cryptex(void);
+extern uint64_t dyld_flags;
+extern void commpage_update_dyld_flags(uint64_t);
+extern volatile uint32_t yunluo_cryptex_opens;
+extern volatile uint32_t yunluo_cryptex_ioctls;
+extern volatile uint32_t yunluo_cryptex_reads;
+extern volatile uint32_t yunluo_cryptex_badcmd;
+volatile int yunluo_preboot_status;   /* 1 dev 2 apfs 3 bindfs 4 cache; <0 error */
+
+/*
+ * yunluo: iOS 17 keeps libSystem and the dyld shared cache in the
+ * Cryptex1,SystemOS APFS volume, not on the OS root. The UFS driver publishes
+ * that container as a second block device (written at the start of userdata)
+ * and records its BSD name in yunluo_cryptex_dev. Mount it, then union its
+ * System/Library/Caches over the root's, so dyld finds the cache by its usual
+ * path. Both mounts use the same payload shape as native_owner_cache_prepare.
+ */
+#define YLOG(...) do { \
+	size_t yu = strlen(yunluo_preboot_log); \
+	snprintf(yunluo_preboot_log + yu, sizeof(yunluo_preboot_log) - yu, __VA_ARGS__); \
+} while (0)
+
+static int
+yunluo_preboot_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp_out)
+{
+	int error = 0, result = 0;
+	char device_path[64];
+	struct mount_args request = {.type = scratch + 0x100, .path = scratch + 0x120,
+	    .flags = MNT_RDONLY, .data = scratch + 0x200};
+	user64_addr_t spec = scratch + 0x160;
+	uint8_t mount_data[0x150] = {0};
+	uint64_t mount_flags = MNT_RDONLY;
+	uint16_t mount_mode = 1;
+	uint32_t anonymous_owner = 99;
+	vnode_t probe = NULLVP;
+
+	(void)envp_out;
+	(void)result;
+
+	/* Publish both exposures and wait for the apfs volume device (diskNs1):
+	 * mount_apfs mounts a volume, not the bare container (a container mount
+	 * ends in ENOENT after the container itself reads fine). */
+	printf("YUNLUO: publishing cryptex devices: %d\n", yunluo_publish_cryptex() ? 1 : 0);
+	for (int i = 0; i < 400; i++) {
+		if (__atomic_load_n(&yunluo_cryptex_dev_ready, __ATOMIC_ACQUIRE)) {
+			break;
+		}
+		if ((i % 20) == 19) {
+			(void)yunluo_publish_cryptex();
+		}
+		if ((i % 100) == 99) {
+			printf("YUNLUO: waiting for cryptex volume (%d s)\n", (i + 1) / 20);
+		}
+		IOSleep(50);
+	}
+	YLOG("wait=%d ", __atomic_load_n(&yunluo_cryptex_dev_ready, __ATOMIC_ACQUIRE) ? 1 : 0);
+	if (!__atomic_load_n(&yunluo_cryptex_dev_ready, __ATOMIC_ACQUIRE)) {
+		printf("YUNLUO: cryptex volume never appeared\n");
+		yunluo_preboot_status = -4;
+		return ENOENT;
+	}
+	snprintf(device_path, sizeof(device_path), "/dev/%.31s", yunluo_cryptex_dev);
+	YLOG("dev=%s ", device_path);
+
+	error = ENOENT;
+	for (int r = 0; r < 20; r++) {
+		error = vnode_lookup(device_path, 0, &probe, vfs_context_current());
+		if (error == 0) {
+			vnode_put(probe);
+			probe = NULLVP;
+			break;
+		}
+		IOSleep(50);
+	}
+	if (error != 0) {
+		printf("YUNLUO: %s never appeared (%d)\n", device_path, error);
+		yunluo_preboot_status = -1;
+		return error;
+	}
+	yunluo_preboot_status = 1;
+	printf("YUNLUO: mounting %s on /private/preboot\n", device_path);
+	/* 100 = mount in progress: the driver must stop touching media or VFS. */
+	yunluo_preboot_status = 100;
+
+	memcpy(mount_data, &spec, sizeof(spec));
+	memcpy(mount_data + 8, &mount_flags, sizeof(mount_flags));
+	memcpy(mount_data + 16, &mount_mode, sizeof(mount_mode));
+	memcpy(mount_data + 0x144, &anonymous_owner, sizeof(anonymous_owner));
+	memcpy(mount_data + 0x148, &anonymous_owner, sizeof(anonymous_owner));
+	if ((error = copyout("apfs", request.type, 5)) != 0 ||
+	    (error = copyout("/private/preboot", request.path, strlen("/private/preboot") + 1)) != 0 ||
+	    (error = copyout(device_path, spec, strlen(device_path) + 1)) != 0 ||
+	    (error = copyout(mount_data, request.data, sizeof(mount_data))) != 0) {
+		printf("YUNLUO: cryptex mount payload failed %d\n", error);
+		yunluo_preboot_status = -2;
+		return error;
+	}
+	error = mount(p, &request, &result);
+	YLOG("apfs=%d op=%u io=%u rd=%u bad=0x%x ", error, yunluo_cryptex_opens,
+	    yunluo_cryptex_ioctls, yunluo_cryptex_reads, yunluo_cryptex_badcmd);
+	printf("YUNLUO: apfs mount returned %d\n", error);
+	if (error) {
+		yunluo_preboot_status = -2;
+		return error;
+	}
+
+	/* Verify like the reference does: apfs and read-only. */
+	{
+		vnode_t mpv = NULLVP;
+		mount_t mnt = NULL;
+		int bad = 1;
+		if (vnode_lookup("/private/preboot", 0, &mpv, vfs_context_current()) == 0) {
+			mnt = vnode_mount(mpv);
+			if (mnt && vfs_statfs(mnt) &&
+			    strcmp(vfs_statfs(mnt)->f_fstypename, "apfs") == 0) {
+				bad = 0;
+			}
+			vnode_put(mpv);
+		}
+		if (bad) {
+			printf("YUNLUO: mounted, but not an apfs read-only mount\n");
+			yunluo_preboot_status = -2;
+			return EINVAL;
+		}
+	}
+	yunluo_preboot_status = 2;
+	printf("YUNLUO: cryptex mounted (apfs, read-only)\n");
+
+	/* dyld ignores DYLD_* for launchd, so the cache must sit at its default
+	 * path: union the cryptex's Caches over the root's. */
+	{
+		const char *bind_source = "/private/preboot/System/Library/Caches";
+		const char *bind_point = "/System/Library/Caches";
+		const char *bind_source_os = "/private/preboot/System";
+		const char *bind_point_os = "/System/Cryptexes/OS";
+		int src_ok;
+
+		src_ok = vnode_lookup(bind_source, 0, &probe, vfs_context_current()) == 0;
+		if (src_ok) {
+			vnode_put(probe);
+			probe = NULLVP;
+		} else {
+			bind_source = "/private/preboot/System/Library";
+			bind_point = "/System/Library";
+			printf("YUNLUO: cryptex has no Caches dir, unioning /System/Library\n");
+		}
+
+		/* iOS 17 dyld also probes /System/Cryptexes/OS, which the OS root
+		 * carries as an empty directory. Union the cryptex's System tree
+		 * there too, so both candidates resolve. */
+		{
+			vnode_t osv = NULLVP;
+			int os_lookup = vnode_lookup("/System/Cryptexes/OS", 0, &osv, vfs_context_current());
+			if (os_lookup != 0) {
+				printf("YUNLUO: /System/Cryptexes/OS missing (lookup=%d), union skipped\n", os_lookup);
+			}
+			if (os_lookup == 0) {
+				struct mount_args os_req = {.type = scratch + 0x100,
+				    .path = scratch + 0x120, .flags = MNT_RDONLY | MNT_UNION,
+				    .data = scratch + 0x200};
+				vnode_put(osv);
+				native_bindfs_boot_mount = 1;
+				if (copyout("bindfs", os_req.type, 7) == 0 &&
+				    copyout(bind_point_os, os_req.path, strlen(bind_point_os) + 1) == 0 &&
+				    copyout(bind_source_os, os_req.data, strlen(bind_source_os) + 1) == 0) {
+					int oserr = mount(p, &os_req, &result);
+					printf("YUNLUO: bindfs %s -> %s returned %d\n",
+					    bind_source_os, bind_point_os, oserr);
+				}
+				native_bindfs_boot_mount = 0;
+				/* the request block was reused; restore the Caches one */
+				request.type = scratch + 0x100;
+				request.path = scratch + 0x120;
+				request.data = scratch + 0x200;
+			}
+		}
+		/* fb157: the OS cryptex also carries usr/lib (libobjc-trampolines.dylib
+		 * among others).  A real device reaches it through a firmlink planted at
+		 * /usr/lib; this port has none, so every ObjC process that calls
+		 * imp_implementationWithBlock died on the dlopen (273 in one boot).
+		 * Union the cryptex directory over the root's, same shape as below. */
+		{
+			vnode_t ulv = NULLVP;
+			const char *usr_lib_src = "/private/preboot/usr/lib";
+			const char *usr_lib_dst = "/usr/lib";
+			if (vnode_lookup(usr_lib_src, 0, &ulv, vfs_context_current()) == 0) {
+				struct mount_args ul_req = {.type = scratch + 0x100,
+				    .path = scratch + 0x120, .flags = MNT_RDONLY | MNT_UNION,
+				    .data = scratch + 0x200};
+				vnode_put(ulv);
+				native_bindfs_boot_mount = 1;
+				if (copyout("bindfs", ul_req.type, 7) == 0 &&
+				    copyout(usr_lib_dst, ul_req.path, strlen(usr_lib_dst) + 1) == 0 &&
+				    copyout(usr_lib_src, ul_req.data, strlen(usr_lib_src) + 1) == 0) {
+					int ulerr = mount(p, &ul_req, &result);
+					printf("YUNLUO: bindfs %s -> %s returned %d\n",
+					    usr_lib_src, usr_lib_dst, ulerr);
+				}
+				native_bindfs_boot_mount = 0;
+				request.type = scratch + 0x100;
+				request.path = scratch + 0x120;
+				request.data = scratch + 0x200;
+			} else {
+				printf("YUNLUO: cryptex has no usr/lib (skip)\n");
+			}
+		}
+		/* fb160: the same cryptex carries System/Library/PrivateFrameworks
+		 * (PlugInKitDaemon.framework, 16 processes died on it) and Frameworks.
+		 * A real device firmlinks them; union each present directory. */
+		{
+			static const char *const kUnionDirs[] = {
+				"/private/preboot/System/Library/PrivateFrameworks",
+				"/private/preboot/System/Library/Frameworks",
+				"/private/preboot/System/Library/Extensions",
+			};
+			for (size_t ui = 0; ui < sizeof(kUnionDirs) / sizeof(kUnionDirs[0]); ui++) {
+				const char *csrc = kUnionDirs[ui];
+				char cdst[128];
+				const char *suffix = csrc + strlen("/private/preboot");
+				vnode_t uv = NULLVP;
+				if (strlen(suffix) + 1 >= sizeof(cdst)) {
+					continue;
+				}
+				strlcpy(cdst, suffix, sizeof(cdst));
+				if (vnode_lookup(csrc, 0, &uv, vfs_context_current()) != 0) {
+					printf("YUNLUO: union src absent %s\n", csrc);
+					continue;
+				}
+				vnode_put(uv);
+				{
+					struct mount_args u_req = {.type = scratch + 0x100,
+					    .path = scratch + 0x120, .flags = MNT_RDONLY | MNT_UNION,
+					    .data = scratch + 0x200};
+					int uerr = -1;
+					native_bindfs_boot_mount = 1;
+					if (copyout("bindfs", u_req.type, 7) == 0 &&
+					    copyout(cdst, u_req.path, strlen(cdst) + 1) == 0 &&
+					    copyout(csrc, u_req.data, strlen(csrc) + 1) == 0) {
+						uerr = mount(p, &u_req, &result);
+					}
+					native_bindfs_boot_mount = 0;
+					printf("YUNLUO: bindfs %s -> %s returned %d\n", csrc, cdst, uerr);
+				}
+				request.type = scratch + 0x100;
+				request.path = scratch + 0x120;
+				request.data = scratch + 0x200;
+			}
+		}
+		request.flags = MNT_RDONLY | MNT_UNION;
+		native_bindfs_boot_mount = 1;
+		if ((error = copyout("bindfs", request.type, 7)) != 0 ||
+		    (error = copyout(bind_point, request.path, strlen(bind_point) + 1)) != 0 ||
+		    (error = copyout(bind_source, request.data, strlen(bind_source) + 1)) != 0) {
+			native_bindfs_boot_mount = 0;
+			yunluo_bind_err = error;
+			yunluo_preboot_status = -3;
+			printf("YUNLUO: bindfs payload failed %d\n", error);
+			return error;
+		}
+		error = mount(p, &request, &result);
+		native_bindfs_boot_mount = 0;
+		yunluo_bind_err = error;
+		YLOG("bind=%d ", error);
+		printf("YUNLUO: bindfs %s -> %s returned %d\n", bind_source, bind_point, error);
+		if (error) {
+			yunluo_preboot_status = -3;
+			return error;
+		}
+		yunluo_preboot_status = 3;
+
+		/* fb159: the union returned 0 in fb158 yet the dlopen failure did not
+		 * change, so check the file itself through both paths. */
+		{
+			vnode_t tv = NULLVP;
+			int via_union = vnode_lookup("/usr/lib/libobjc-trampolines.dylib",
+			    0, &tv, vfs_context_current());
+			if (tv) { vnode_put(tv); tv = NULLVP; }
+			int via_cryptex = vnode_lookup(
+			    "/private/preboot/usr/lib/libobjc-trampolines.dylib",
+			    0, &tv, vfs_context_current());
+			if (tv) { vnode_put(tv); tv = NULLVP; }
+			printf("YUNLUO: libobjc-trampolines sees union=%d cryptex=%d\n",
+			    via_union, via_cryptex);
+		}
+	}
+
+	/*
+	 * Original dyld bit 3 selects "no ignition": the same switch the owner
+	 * cache chain uses (see native_owner_cache_prepare). Without it libignition
+	 * demands a Preboot volume with role 0x18, which this port cannot create,
+	 * and launchd exits with EX_NOINPUT before any job is started.
+	 */
+	dyld_flags |= UINT64_C(8);
+	commpage_update_dyld_flags(dyld_flags);
+	printf("YUNLUO: dyld_flags=0x%llx (no ignition)\n",
+	    (unsigned long long)dyld_flags);
+
+	/* The path dyld itself uses, after the union. */
+	error = vnode_lookup("/System/Library/Caches/com.apple.dyld/dyld_shared_cache_arm64", 0,
+	    &probe, vfs_context_current());
+	yunluo_cache_visible = error;
+	if (error == 0) {
+		char hdr[16] = {0};
+		int resid = 0;
+		int rerr = vn_rdwr(UIO_READ, probe, hdr, sizeof(hdr), 0, UIO_SYSSPACE, 0,
+		    kauth_cred_get(), &resid, p);
+		int i;
+		yunluo_cache_read_err = rerr;
+		for (i = 0; i < 16; i++) {
+			yunluo_cache_magic[i] = (hdr[i] >= 0x20 && hdr[i] < 0x7f) ? hdr[i] : '.';
+		}
+		yunluo_cache_magic[16] = 0;
+		YLOG("vis=0 magic=%s rd=%d ", yunluo_cache_magic, rerr);
+		vnode_put(probe);
+		printf("YUNLUO: dyld shared cache visible magic=%.16s rd=%d\n",
+		    yunluo_cache_magic, rerr);
+		yunluo_preboot_status = (rerr == 0 && resid == 0) ? 4 : -5;
+	} else {
+		YLOG("vis=%d ", error);
+		printf("YUNLUO: dyld shared cache still missing (%d)\n", error);
+		yunluo_preboot_status = -5;
+	}
+	return 0;
+}
+
+/*
+ * yunluo: the sealed root has no Data volume, so every writer under
+ * /private/var (keybags, user sessions, launchd.log, swap files) and
+ * /Library/Preferences fails with EROFS and launchd stalls right after
+ * init_featureflags.  The PackedRAMDisk seed (Payloads/scratch-data.img,
+ * loaded by DarwinBoot into /chosen/memory-map) is an APFS container whose
+ * volume UUID XNU_OWNER_DATA_VOLUME_UUID names: mount it read-write at
+ * /private/var, create the fixed directory skeleton the first writers need,
+ * and union its Library/Preferences over the sealed root's.  A missing seed
+ * or a failed step only logs; the boot then continues exactly as before
+ * (read-only root; yunluo_data_status says where it stopped).
+ */
+#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+/* build/xnu/owner-data-volume.h only defines this with XNU_OWNER_DATA_MOUNT=1; yunluo mounts the seed without the owner chain, so keep the value here and let the generated header win when present. */
+#ifndef XNU_OWNER_DATA_VOLUME_UUID
+#define XNU_OWNER_DATA_VOLUME_UUID "18AB5557-DC2D-469B-8758-855E60F5B0DF"
+#endif
+extern int native_ram_block_volume_device(const char *, dev_t *, char *, size_t);
+extern volatile uint32_t native_ram_block_ready;
+volatile int yunluo_data_status;           /* 1 volume 2 mounted 3 bound; <0 error */
+volatile int yunluo_data_bind_err = -1;
+volatile dev_t yunluo_data_device = NODEV;
+
+static void
+yunluo_data_prepare(proc_t p, user_addr_t scratch)
+{
+	static const char * const dirs[] = {
+		"/private/var/Library", "/private/var/Library/Preferences",
+		"/private/var/log", "/private/var/log/com.apple.xpc.launchd",
+		"/private/var/keybags", "/private/var/vm",
+		"/private/var/run", "/private/var/tmp", "/private/var/mobile",
+		"/private/var/mobile/Library", "/private/var/mobile/Library/Preferences",
+		"/private/var/logs", "/private/var/Keychains", "/private/var/MobileDevice",
+		"/private/var/db",
+		/* tzinit falls back to the system dataset (/usr/share/zoneinfo.default
+		 * + /usr/share/icu on the sealed root) and links inside this dir;
+		 * without it tzinit exits 2 and launchd panics the boot (expdbxnu15). */
+		"/private/var/db/timezone",
+		/* the sealed root's /Library/Preferences is a symlink to exactly this
+		 * (lowercase) name; once it exists init_featureflags writes land on the
+		 * data volume through the link and no bind mount is needed. */
+		"/private/var/preferences", "/private/var/preferences/FeatureFlags",
+		"/private/var/cores",
+	};
+	char device_path[64] = {0};
+	dev_t device = NODEV;
+	int error, i;
+	int32_t retval = 0;
+	vnode_t var_root = NULLVP;
+	struct mount_args request = {.type = scratch + 0x400, .path = scratch + 0x420,
+	    .flags = 0, .data = scratch + 0x500};
+	user64_addr_t spec = scratch + 0x460;
+	uint8_t mount_data[0x150] = {0};
+	uint16_t mount_mode = 1;
+	uint32_t anonymous_owner = 99;
+
+	for (i = 0; i < 800; i++) {
+		if (native_ram_block_volume_device(XNU_OWNER_DATA_VOLUME_UUID, &device,
+		    device_path, sizeof(device_path))) {
+			break;
+		}
+		/* No ram disk at all (no seed in the payload): stop early. */
+		if (i >= 100 && !__atomic_load_n(&native_ram_block_ready, __ATOMIC_ACQUIRE)) {
+			break;
+		}
+		if ((i % 100) == 99) {
+			printf("YUNLUO: waiting for data volume (%d s)\n", (i + 1) / 20);
+		}
+		IOSleep(50);
+	}
+	if (device == NODEV) {
+		printf("YUNLUO: no data volume (no PackedRAMDisk seed?), ready=%u\n",
+		    native_ram_block_ready);
+		return;
+	}
+	yunluo_data_status = 1;
+	printf("YUNLUO: data volume %s\n", device_path);
+
+	memcpy(mount_data, &spec, sizeof(spec));
+	memcpy(mount_data + 16, &mount_mode, sizeof(mount_mode));
+	memcpy(mount_data + 0x144, &anonymous_owner, sizeof(anonymous_owner));
+	memcpy(mount_data + 0x148, &anonymous_owner, sizeof(anonymous_owner));
+	if ((error = copyout("apfs", request.type, 5)) != 0 ||
+	    (error = copyout("/private/var", request.path, strlen("/private/var") + 1)) != 0 ||
+	    (error = copyout(device_path, spec, strlen(device_path) + 1)) != 0 ||
+	    (error = copyout(mount_data, request.data, sizeof(mount_data))) != 0) {
+		yunluo_data_status = -2;
+		printf("YUNLUO: data mount payload failed %d\n", error);
+		return;
+	}
+	retval = 0;
+	error = mount(p, &request, &retval);
+	if (error) {
+		yunluo_data_status = -3;
+		printf("YUNLUO: data mount on /private/var returned %d\n", error);
+		return;
+	}
+	/* The same payload shape as native_owner_data_prepare: verify an apfs
+	 * read-write mount of exactly the seeded device. */
+	if (vnode_lookup("/private/var", 0, &var_root, vfs_context_current()) != 0) {
+		yunluo_data_status = -4;
+		printf("YUNLUO: /private/var lookup failed after mount\n");
+		return;
+	}
+	{
+		mount_t mnt = vnode_mount(var_root);
+		vnode_t devvp = vfs_devvp(mnt);
+		dev_t actual = devvp ? vnode_specrdev(devvp) : NODEV;
+		if (devvp) {
+			vnode_put(devvp);
+		}
+		yunluo_data_device = actual;
+		if (actual != device || (vfs_flags(mnt) & MNT_RDONLY) ||
+		    strcmp(vfs_statfs(mnt)->f_fstypename, "apfs")) {
+			vnode_put(var_root);
+			yunluo_data_status = -4;
+			printf("YUNLUO: /private/var is not the seeded read-write apfs\n");
+			return;
+		}
+	}
+	vnode_put(var_root);
+	yunluo_data_status = 2;
+	printf("YUNLUO: /private/var mounted read-write (apfs)\n");
+
+	/* One-level mkdirs; EEXIST from the seed's own pages is fine. */
+	for (i = 0; i < (int)(sizeof(dirs) / sizeof(dirs[0])); i++) {
+		struct mkdir_args margs = {.path = scratch + 0x700, .mode = 0755};
+		vnode_t probe2 = NULLVP;
+		int exists = vnode_lookup(dirs[i], 0, &probe2, vfs_context_current()) == 0;
+		if (exists) {
+			vnode_put(probe2);
+			continue;
+		}
+		if (copyout(dirs[i], margs.path, strlen(dirs[i]) + 1) != 0) {
+			printf("YUNLUO: mkdir %s copyout failed\n", dirs[i]);
+			continue;
+		}
+		retval = 0;
+		error = mkdir(p, &margs, &retval);
+		printf("YUNLUO: mkdir %s -> %d (retval %d)\n", dirs[i], error, retval);
+	}
+
+	/* fb198: PerfPowerServices' PowerlogCore reads allowLiteModeDaemon from
+	 * the mobile preferences.  Disable the lite daemon for display bring-up:
+	 * it avoids the operator/Foundation abort path; telemetry is off. */
+	{
+		static const char yunluo_powerlog_pref[] =
+		    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+		    "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" "
+		    "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n"
+		    "<plist version=\"1.0\"><dict>"
+		    "<key>allowLiteModeDaemon</key><false/>"
+		    "</dict></plist>\n";
+		static const char *const yunluo_powerlog_prefs[] = {
+			"/private/var/mobile/Library/Preferences/com.apple.powerlog.plist",
+			"/private/var/mobile/Library/Preferences/com.apple.powerlogd.plist",
+			"/private/var/mobile/Library/Preferences/com.apple.PerfPowerServices.plist",
+		};
+		for (i = 0; i < (int)(sizeof(yunluo_powerlog_prefs) /
+		    sizeof(yunluo_powerlog_prefs[0])); i++) {
+			struct open_args oargs = {.path = scratch + 0x900,
+			    .flags = O_CREAT | O_WRONLY | O_TRUNC, .mode = 0644};
+			struct write_args wargs = {.fd = -1, .cbuf = scratch + 0xa00,
+			    .nbyte = sizeof(yunluo_powerlog_pref) - 1};
+			int32_t fd = -1;
+			user_ssize_t ywret = 0;
+			if (copyout(yunluo_powerlog_prefs[i], oargs.path,
+			    strlen(yunluo_powerlog_prefs[i]) + 1) != 0 ||
+			    copyout(yunluo_powerlog_pref, wargs.cbuf,
+			    sizeof(yunluo_powerlog_pref)) != 0) {
+				printf("YUNLUO: powerlog pref copyout failed %s\n",
+				    yunluo_powerlog_prefs[i]);
+				continue;
+			}
+			retval = 0;
+			error = open(p, &oargs, &retval);
+			fd = error ? -1 : retval;
+			if (fd >= 0) {
+				wargs.fd = fd;
+				retval = 0;
+				error = write(p, &wargs, &ywret);
+			}
+			printf("YUNLUO: powerlog pref %s -> %d (fd %d)\n",
+			    yunluo_powerlog_prefs[i], error, fd);
+		}
+	}
+
+#if 0 /* Withdraw Setup/activation writes; keep normal Data preparation below. */
+	/* fb257/259: skip Setup and claim activation.
+	 * fb257 mirrors the hardware-proven recipe in src/UniXNU/scripts/seed-data-skip-setup.py
+	 * (ios-sweet): buddy preferences done, mini-buddy flags off, SpringBoard watchdogs off,
+	 * 21H461 migration claim. fb259 adds mobileactivationd's own DataArk
+	 * (/private/var/mobile/Library/mad/data_ark.plist, keys named by the daemon binary):
+	 * without ActivationState=Activated the Setup Assistant runs regardless of preferences.
+	 * Everything is written as root, so ownership is handed to mobile (501) afterwards. */
+	{
+		static const struct {
+			const char *path;
+			const char *text;
+		} yunluo_setup_prefs[] = {
+		    {"/private/var/mobile/Library/Preferences/com.apple.purplebuddy.plist",
+		     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>SetupDone</key><true/><key>SetupFinishedAllSteps</key><true/><key>SetupVersion</key><integer>11</integer><key>daemonizeNeedsToRun</key><false/></dict></plist>\n"},
+		    {"/private/var/mobile/Library/Preferences/com.apple.purplebuddy.notbackedup.plist",
+		     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>ShouldRunDiagnosticsMiniBuddy</key><false/><key>ShouldRunHSA2MiniBuddy</key><false/><key>ShouldRunKeychainSyncMiniBuddy</key><false/><key>ShouldRunMesaMiniBuddy</key><false/><key>ShouldRunPaymentMiniBuddy</key><false/><key>ShouldRunStandardMiniBuddy</key><false/><key>SilentICDPUpgrade</key><false/></dict></plist>\n"},
+		    {"/private/var/mobile/Library/Preferences/com.apple.managedconfiguration.notbackedup.plist",
+		     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>LockdownActivationIndicatesCloudConfigurationAvailable</key><false/></dict></plist>\n"},
+		    {"/private/var/mobile/Library/Preferences/com.apple.springboard.plist",
+		     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>BKNoWatchdogs</key><true/><key>FBLaunchWatchdogExceptions</key><dict><key>com.apple.purplebuddy</key><real>100</real></dict><key>MCForceShowCloudConfigurationUI</key><false/><key>SBDisableAutoDim</key><true/><key>SBDontDimOrLockOnAC</key><true/><key>SBDisableIdleSleep</key><true/></dict></plist>\n"},
+		    {"/private/var/mobile/Library/Preferences/com.apple.migration.plist",
+		     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>LastSystemVersion</key><string>21H461</string><key>DMUserDataDisposition</key><dict><key>SyntheticDidUpgrade</key><false/><key>buildVersion</key><string>21H461</string></dict></dict></plist>\n"},
+		    {"/private/var/mobile/Library/mad/data_ark.plist",
+		     "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>ActivationState</key><string>Activated</string><key>FactoryActivated</key><true/><key>BrickState</key><integer>0</integer></dict></plist>\n"},
+		};
+		{
+			struct mkdir_args m0 = {.path = scratch + 0xd00, .mode = 0755};
+			retval = 0;
+			if (copyout("/private/var/mobile/Library/mad", m0.path,
+			    sizeof("/private/var/mobile/Library/mad")) == 0)
+				(void)mkdir(p, &m0, &retval);
+		}
+		for (i = 0; i < (int)(sizeof(yunluo_setup_prefs) /
+		    sizeof(yunluo_setup_prefs[0])); i++) {
+			struct open_args oargs = {.path = scratch + 0x900,
+			    .flags = O_CREAT | O_WRONLY | O_TRUNC, .mode = 0644};
+			struct write_args wargs = {.fd = -1, .cbuf = scratch + 0xa00,
+			    .nbyte = (user_size_t)strlen(yunluo_setup_prefs[i].text)};
+			int32_t fd = -1;
+			user_ssize_t swret = 0;
+			if (copyout(yunluo_setup_prefs[i].path, oargs.path,
+			    strlen(yunluo_setup_prefs[i].path) + 1) != 0 ||
+			    copyout(yunluo_setup_prefs[i].text, wargs.cbuf,
+			    strlen(yunluo_setup_prefs[i].text) + 1) != 0) {
+				printf("YUNLUO: setup pref copyout failed %s\n",
+				    yunluo_setup_prefs[i].path);
+				continue;
+			}
+			retval = 0;
+			error = open(p, &oargs, &retval);
+			fd = error ? -1 : retval;
+			if (fd >= 0) {
+				wargs.fd = fd;
+				retval = 0;
+				error = write(p, &wargs, &swret);
+			}
+			printf("YUNLUO: setup pref %s -> %d (%d bytes)\n",
+			    yunluo_setup_prefs[i].path, error, (int)swret);
+		}
+		for (i = 0; i < (int)(sizeof(yunluo_setup_prefs) /
+		    sizeof(yunluo_setup_prefs[0])); i++) {
+			vnode_t svp = NULLVP;
+			struct vnode_attr sva;
+			VATTR_INIT(&sva);
+			if (vnode_lookup(yunluo_setup_prefs[i].path, 0, &svp,
+			    vfs_context_current()) != 0)
+				continue;
+			VATTR_WANTED(&sva, va_mode);
+			VATTR_WANTED(&sva, va_uid);
+			VATTR_WANTED(&sva, va_gid);
+			sva.va_mode = 0644;
+			sva.va_uid = 501;
+			sva.va_gid = 501;
+			printf("YUNLUO: setup own %s -> %d\n",
+			    yunluo_setup_prefs[i].path,
+			    vnode_setattr(svp, &sva, vfs_context_current()));
+			vnode_put(svp);
+		}
+		static const char *const yunluo_setup_dirs[] = {
+		    "/private/var/containers/Bundle",
+		    "/private/var/containers/Data/System",
+		    "/private/var/containers/Shared/SystemGroup",
+		    "/private/var/containers/Temp",
+		    "/private/var/mobile/Library/mad/activation_records",
+		};
+		for (i = 0; i < (int)(sizeof(yunluo_setup_dirs) /
+		    sizeof(yunluo_setup_dirs[0])); i++) {
+			struct mkdir_args margs = {.path = scratch + 0xc00, .mode = 0755};
+			retval = 0;
+			if (copyout(yunluo_setup_dirs[i], margs.path,
+			    strlen(yunluo_setup_dirs[i]) + 1) != 0)
+				continue;
+			error = mkdir(p, &margs, &retval);
+			printf("YUNLUO: setup dir %s -> %d\n", yunluo_setup_dirs[i], error);
+			if (error == 0 || error == EEXIST) {
+				vnode_t dvp = NULLVP;
+				struct vnode_attr dva;
+				VATTR_INIT(&dva);
+				if (vnode_lookup(yunluo_setup_dirs[i], 0, &dvp,
+				    vfs_context_current()) == 0) {
+					VATTR_WANTED(&dva, va_mode);
+					VATTR_WANTED(&dva, va_uid);
+					VATTR_WANTED(&dva, va_gid);
+					dva.va_mode = 0755;
+					dva.va_uid = 501;
+					dva.va_gid = 501;
+					(void)vnode_setattr(dvp, &dva, vfs_context_current());
+					vnode_put(dvp);
+				}
+			}
+		}
+	}
+
+#endif
+	/* Union the writable Library/Preferences over the sealed root's, so
+	 * init_featureflags can create FeatureFlags and reads still see lower
+	 * entries.  Plain bind is the fallback if the union variant is refused. */
+	{
+		vnode_t src = NULLVP, dst = NULLVP;
+		int serr = vnode_lookup("/private/var/Library/Preferences", 0, &src, vfs_context_current());
+		int derr = vnode_lookup("/Library/Preferences", 0, &dst, vfs_context_current());
+		printf("YUNLUO: bindfs precheck src=%d dst=%d\n", serr, derr);
+		if (serr == 0) {
+			vnode_put(src);
+		}
+		if (derr == 0) {
+			vnode_put(dst);
+		}
+	}
+	/* The precheck above resolves /Library/Preferences through the sealed
+	 * root's symlink; when that now lands on the data volume the overlay is
+	 * redundant. */
+	vnode_t linkvp = NULLVP;
+	if (vnode_lookup("/Library/Preferences", 0, &linkvp, vfs_context_current()) == 0) {
+		vnode_put(linkvp);
+		printf("YUNLUO: /Library/Preferences resolves on the data volume, bindfs skipped\n");
+		yunluo_data_status = 3;
+		return;
+	}
+	for (i = 0; i < 2; i++) {
+		request.flags = i == 0 ? MNT_UNION : 0;
+		retval = 0;
+		native_bindfs_boot_mount = 1;
+		error = copyout("bindfs", request.type, 7) ||
+		    copyout("/Library/Preferences", request.path, strlen("/Library/Preferences") + 1) ||
+		    copyout("/private/var/Library/Preferences", request.data,
+		        strlen("/private/var/Library/Preferences") + 1);
+		if (error == 0) {
+			error = mount(p, &request, &retval);
+		}
+		native_bindfs_boot_mount = 0;
+		printf("YUNLUO: bindfs /private/var/Library/Preferences -> /Library/Preferences flags=%d returned %d\n",
+		    (int)request.flags, error);
+		if (error == 0) {
+			break;
+		}
+	}
+	yunluo_data_bind_err = error;
+	yunluo_data_status = error ? -5 : 3;
+}
+#endif
+#endif /* YUNLUO_PREBOOT_MOUNT */
+
+#if defined(XNU_NATIVE_SETUP_INIT) && XNU_NATIVE_SETUP_INIT && \
+    defined(YUNLUO_PREBOOT_MOUNT) && YUNLUO_PREBOOT_MOUNT && \
+    defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK && (DEBUG || DEVELOPMENT)
+extern const uint8_t native_setup_parent_blob[], native_setup_setter_blob[];
+extern const unsigned long native_setup_parent_size, native_setup_setter_size;
+extern const char native_setup_parent_path[], native_setup_setter_path[];
+
+static int
+yunluo_setup_stage(proc_t p, user_addr_t scratch, const uint8_t *image,
+    unsigned long length, const char *path)
+{
+    struct open_args request = {
+        .path = scratch + 0x100,
+        .flags = O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW_ANY,
+        .mode = 0555,
+    };
+    int32_t fd = -1, retval = 0;
+    int error, existing = 0;
+    if (length < 32 || length > 0x40000 || strlen(path) >= 128 ||
+        copyout(path, request.path, strlen(path) + 1)) {
+        return EINVAL;
+    }
+    error = open(p, &request, &retval);
+    if (error == EEXIST) {
+        existing = 1;
+        request.flags = O_RDONLY | O_NOFOLLOW_ANY;
+        error = open(p, &request, &retval);
+    }
+    if (error) {
+        return error;
+    }
+    fd = retval;
+    for (unsigned long offset = 0; offset < length && !error;) {
+        unsigned long take = length - offset;
+        user_ssize_t amount = 0;
+        if (take > 1024) {
+            take = 1024;
+        }
+        if (existing) {
+            uint8_t compare[1024];
+            struct read_args input = {
+                .fd = fd, .cbuf = scratch + 0x800, .nbyte = take,
+            };
+            error = read(p, &input, &amount);
+            if (!error && (amount != (user_ssize_t)take ||
+                copyin(input.cbuf, compare, take) ||
+                memcmp(compare, image + offset, take))) {
+                error = EIO;
+            }
+        } else {
+            struct write_args output = {
+                .fd = fd, .cbuf = scratch + 0x800, .nbyte = take,
+            };
+            if (copyout(image + offset, output.cbuf, take)) {
+                error = EFAULT;
+            } else {
+                error = write(p, &output, &amount);
+                if (!error && amount != (user_ssize_t)take) {
+                    error = EIO;
+                }
+            }
+        }
+        offset += take;
+    }
+    if (!error && existing) {
+        struct read_args input = {.fd = fd, .cbuf = scratch + 0x800, .nbyte = 1};
+        user_ssize_t amount = 0;
+        error = read(p, &input, &amount);
+        if (!error && amount != 0) {
+            error = EIO;
+        }
+    }
+    if (!error && !existing) {
+        struct fsync_args sync = {.fd = fd};
+        error = fsync(p, &sync, &retval);
+    }
+    struct close_args close_request = {.fd = fd};
+    int close_error = sys_close(p, &close_request, &retval);
+    if (!error) {
+        error = close_error;
+    }
+    printf("YUNLUO-SETUP stage path=%s bytes=%lu existing=%d result=%d\n",
+        path, length, existing, error);
+    return error;
+}
+#endif
+
 void
 load_init_program(proc_t p)
 {
+	boot_progress_stage("load_init_program enter");
 	uint32_t i;
 	int error;
 	vm_map_t map = current_map();
@@ -7148,9 +8268,76 @@ load_init_program(proc_t p)
 	mach_vm_size_t map_page_size = vm_map_page_size(map);
 
 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
+	user_addr_t init_envp = USER_ADDR_NULL;
+#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
+	boot_progress_stage("SystemOS mount enter");
+	int cache_error = native_owner_cache_prepare(p, (user_addr_t)scratch_addr, &init_envp);
+	boot_progress_stage("SystemOS mount returned");
+	if (cache_error) panic("offline owner SystemOS mount failed: %d", cache_error);
+#endif
+#if defined(XNU_OWNER_DATA_MOUNT) && XNU_OWNER_DATA_MOUNT
+	boot_progress_stage("Data mount enter");
+	int data_error = native_owner_data_prepare(p, (user_addr_t)scratch_addr);
+	boot_progress_stage("Data mount returned");
+	if (data_error) panic("offline scratch Data mount failed: %d", data_error);
+#if defined(XNU_BOOT_PROGRESS) && XNU_BOOT_PROGRESS
+	extern int sheng_boot_watchdog_policy(void *, uint64_t);
+	boot_progress_stage("temporary watchdog launch policy enter");
+	int policy_error=sheng_boot_watchdog_policy(p, (uint64_t)scratch_addr);
+	if (policy_error) panic("sheng watchdog launch policy failed: %d", policy_error);
+	boot_progress_stage("temporary watchdog launch policy ready");
+#endif
+#endif
+#if defined(YUNLUO_PREBOOT_MOUNT) && YUNLUO_PREBOOT_MOUNT
+	yunluo_exec_stage = 1;
+	printf("YUNLUO: preboot prepare start\n");
+	(void)yunluo_preboot_prepare(p, (user_addr_t)scratch_addr, &init_envp);
+#if defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK
+	yunluo_data_prepare(p, (user_addr_t)scratch_addr);
+#endif
+	yunluo_exec_stage = 2;
+	printf("YUNLUO: preboot prepare done status=%d\n", yunluo_preboot_status);
+#endif
+#if defined(XNU_NATIVE_SETUP_INIT) && XNU_NATIVE_SETUP_INIT && \
+    defined(YUNLUO_PREBOOT_MOUNT) && YUNLUO_PREBOOT_MOUNT && \
+    defined(XNU_NATIVE_RAM_BLOCK) && XNU_NATIVE_RAM_BLOCK && (DEBUG || DEVELOPMENT)
+    uint32_t setup_init = 0;
+    if (PE_parse_boot_argn("yunluo-setup-init", &setup_init, sizeof(setup_init)) &&
+        setup_init == 1) {
+        printf("YUNLUO-SETUP build=setup-init1 data=%d\n", yunluo_data_status);
+        if (yunluo_data_status == 2 || yunluo_data_status == 3) {
+            int setup_error = yunluo_setup_stage(p, (user_addr_t)scratch_addr,
+                native_setup_setter_blob, native_setup_setter_size, native_setup_setter_path);
+            if (!setup_error) {
+                setup_error = yunluo_setup_stage(p, (user_addr_t)scratch_addr,
+                    native_setup_parent_blob, native_setup_parent_size, native_setup_parent_path);
+            }
+            if (!setup_error) {
+                setup_error = load_init_program_at_path(p, (user_addr_t)scratch_addr,
+                    native_setup_parent_path, init_envp);
+                if (!setup_error) {
+                    return;
+                }
+            }
+            printf("YUNLUO-SETUP staging/exec refused=%d; original launchd\n", setup_error);
+        }
+    }
+#endif
+
 #if CONFIG_MEMORYSTATUS
 	(void) memorystatus_init_at_boot_snapshot();
 #endif /* CONFIG_MEMORYSTATUS */
+
+#if (DEBUG || DEVELOPMENT) && defined(XNU_NATIVE_AIR_INIT) && XNU_NATIVE_AIR_INIT
+	int offline_air = 0;
+	if (PE_parse_boot_argn("offline-air-init", &offline_air, sizeof(offline_air)) && offline_air) {
+		if (offline_air != 1) panic("offline AIR init invalid selector");
+		error = load_init_program_at_path(p, (user_addr_t)scratch_addr,
+		    "/private/var/tmp/air-native", init_envp);
+		if (error) panic("offline signed AIR instrument exec failed: %d", error);
+		return;
+	}
+#endif
 
 #if DEBUG || DEVELOPMENT
 	/* Check for boot-arg suffix first */
@@ -7162,7 +8349,7 @@ load_init_program(proc_t p)
 
 		if (is_release_suffix) {
 			printf("load_init_program: attempting to load /sbin/launchd\n");
-			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, "/sbin/launchd");
+			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, "/sbin/launchd", init_envp);
 			if (!error) {
 				return;
 			}
@@ -7173,7 +8360,7 @@ load_init_program(proc_t p)
 			strlcat(launchd_path, launchd_suffix, sizeof(launchd_path));
 
 			printf("load_init_program: attempting to load %s\n", launchd_path);
-			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, launchd_path);
+			error = load_init_program_at_path(p, (user_addr_t)scratch_addr, launchd_path, init_envp);
 			if (!error) {
 				return;
 			} else if (error != ENOENT) {
@@ -7186,7 +8373,7 @@ load_init_program(proc_t p)
 	error = ENOENT;
 	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
 		printf("load_init_program: attempting to load %s\n", init_programs[i]);
-		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i]);
+		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i], init_envp);
 		if (!error) {
 			return;
 		} else if (error != ENOENT) {
@@ -7632,6 +8819,7 @@ process_signature(proc_t p, struct image_params *imgp)
 	 * approve of exec, kill and return immediately.
 	 */
 	if (imgp->ip_mac_return != 0) {
+		boot_progress_process_stage(proc_getpid(p),p->p_name,"exec MAC policy REFUSED");
 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY, 0, 0);
 		signature_failure_reason = os_reason_create(OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY);
@@ -7794,7 +8982,9 @@ done:
 		 * state.
 		 */
 
+		boot_progress_process_stage(proc_getpid(p),p->p_name,"exec process signature enter");
 		error = proc_process_signature(p, &signature_failure_reason);
+		boot_progress_process_stage(proc_getpid(p),p->p_name,error ? "exec process signature REFUSED" : "exec process signature accepted");
 	}
 
 	if (0 == error) {

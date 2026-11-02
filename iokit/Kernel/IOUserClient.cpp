@@ -44,7 +44,6 @@
 #include <IOKit/IOUserServer.h>
 #include <IOKit/system.h>
 #include <libkern/OSDebug.h>
-#include <DriverKit/OSAction.h>
 #include <sys/proc.h>
 #include <sys/kauth.h>
 #include <sys/codesign.h>
@@ -247,7 +246,6 @@ IOMachPort::noMoreSendersForObject( OSObject * obj,
 {
 	IOMachPort *machPort = NULL;
 	IOUserClient *uc;
-	OSAction *action;
 	bool destroyed = true;
 
 	IOMachPortHashList *bucket = IOMachPort::bucketForObject(obj, type);
@@ -284,8 +282,8 @@ IOMachPort::noMoreSendersForObject( OSObject * obj,
 		lck_mtx_unlock(gIOObjectPortLock);
 	}
 
-	if ((IKOT_UEXT_OBJECT == type) && (action = OSDynamicCast(OSAction, obj))) {
-		action->Aborted();
+	if (IKOT_UEXT_OBJECT == type) {
+		/* Linux port: no DriverKit action objects exist without the user server. */
 	}
 
 	if (IKOT_UEXT_OBJECT == type && IOUserServer::shouldLeakObjects()) {
@@ -2799,6 +2797,34 @@ internal_io_service_get_matching_service(
 		IOTaskRegistryCompatibilityMatching(current_task(), dict);
 		*service = IOService::copyMatchingService( dict );
 		kr = *service ? kIOReturnSuccess : kIOReturnNotFound;
+		{
+			/* fb169: this is the routine IOServiceGetMatchingService uses
+			 * (singular), which is what backboardd's
+			 * IOMobileFramebufferOpen calls.  Print the query and answer. */
+			static unsigned yunluo_single_calls = 0;
+			static unsigned yunluo_single_logs = 0;
+			OSSerialize *ser = NULL;
+			yunluo_single_calls++;
+			/* First 6 unconditionally: proves this routine is reached.
+			 * Then anything naming a framebuffer family.  Bounded. */
+			if (yunluo_single_logs < 60) {
+				ser = OSSerialize::withCapacity(512);
+				if (ser && dict->serialize(ser)) {
+					const char *xml = ser->text();
+					bool interesting = (yunluo_single_calls <= 6) ||
+					    (xml && (strnstr(xml, "Framebuffer", 512) ||
+					             strnstr(xml, "IOMobileGraphics", 512) ||
+					             strnstr(xml, "IOGraphics", 512)));
+					if (interesting) {
+						yunluo_single_logs++;
+						kprintf("YUNLUO-GET1 n=%u query=%s result=%p kr=0x%x\n",
+						    yunluo_single_calls, xml ? xml : "?",
+						    (void *)*service, kr);
+					}
+				}
+				if (ser) ser->release();
+			}
+		}
 	} else {
 		kr = kIOReturnBadArgument;
 	}
@@ -2902,6 +2928,30 @@ internal_io_service_add_notification(
 			continue;
 		}
 		IOTaskRegistryCompatibilityMatching(current_task(), dict);
+		{
+			/* fb170: the framebuffer is discovered through THIS path, not
+			 * through the matching MIGs probed by fb166-169.  Record the
+			 * registration so the dump shows whether it happened and with
+			 * what dictionary. */
+			static unsigned yunluo_notify_logs = 0;
+			OSSerialize *nser = OSSerialize::withCapacity(512);
+			if (nser && dict->serialize(nser)) {
+				const char *nxml = nser->text();
+				bool nint = (yunluo_notify_logs < 40) ||
+				    (nxml && (strnstr(nxml, "Framebuffer", 512) ||
+				              strnstr(nxml, "IOMobileGraphics", 512) ||
+				              strnstr(nxml, "disp0", 512)));
+				if (nint && yunluo_notify_logs < 40) {
+					yunluo_notify_logs++;
+					char nself[17] = {};
+					proc_selfname(nself, sizeof(nself));
+					kprintf("YUNLUO-NOTIFY[%u] type=%s caller=%.16s match=%s\n",
+					    yunluo_notify_logs, notification_type, nself,
+					    nxml ? nxml : "?");
+				}
+			}
+			if (nser) nser->release();
+		}
 
 		if ((sym == gIOPublishNotification)
 		    || (sym == gIOFirstPublishNotification)) {
@@ -4325,6 +4375,53 @@ is_io_service_set_authorization_id(
 }
 
 /* Routine io_service_open_ndr */
+/*
+ * The native GPU driver names, by the property NativeSandboxGrantProcess on its accelerator service, the one process (the render server) to which it
+ * grants its own user client in place of the sandbox's verdict: the original profiles name no class of that driver. Nothing else is affected.
+ */
+extern "C" void proc_selfname(char * buf, int size);
+static bool
+native_sandbox_grant(IOService * service)
+{
+	OSString * process = OSDynamicCast(OSString, service->getProperty("NativeSandboxGrantProcess"));
+	char name[17] = {};
+	if (!process) {
+		return false;
+	}
+	proc_selfname(name, sizeof(name));
+	return 0 == strncmp(name, process->getCStringNoCopy(), sizeof(name) - 1);
+}
+
+/* fb168: the display service is the only thing this probe cares about, so name
+ * it once and reuse.  Anything else stays completely silent. */
+static bool
+yunluo_is_display_service(IOService * service)
+{
+	const char * cls;
+	if (!service || !service->getMetaClass()) {
+		return false;
+	}
+	cls = service->getMetaClass()->getClassName();
+	if (!cls) {
+		return false;
+	}
+	return 0 == strncmp(cls, "NativeLegacy", 12) ||
+	       0 == strcmp(cls, "IOMobileFramebuffer") ||
+	       0 == strcmp(cls, "IOMobileFramebufferLegacy");
+}
+
+static void
+yunluo_open_note(const char * what, IOService * service, int a, int b, int c)
+{
+	static unsigned notes = 0;
+	if (!yunluo_is_display_service(service) || notes >= 64) {
+		return;
+	}
+	notes++;
+	kprintf("YUNLUO-OPEN[%u] %s svc=%s a=%d b=%d c=%d\n", notes, what,
+	    service->getMetaClass()->getClassName(), a, b, c);
+}
+
 kern_return_t
 is_io_service_open_extended(
 	io_object_t _service,
@@ -4344,21 +4441,28 @@ is_io_service_open_extended(
 
 	CHECK( IOService, _service, service );
 
+	yunluo_open_note("enter", service, (int)connect_type, properties ? 1 : 0,
+	    native_sandbox_grant(service) ? 1 : 0);
+
 	if (!owningTask) {
+		yunluo_open_note("gate-owningTask-null", service, 0, 0, 0);
 		return kIOReturnBadArgument;
 	}
 	assert(owningTask == current_task());
 	if (owningTask != current_task()) {
+		yunluo_open_note("gate-owningTask-mismatch", service, 0, 0, 0);
 		return kIOReturnBadArgument;
 	}
 
 #if CONFIG_MACF
-	if (mac_iokit_check_open_service(kauth_cred_get(), service, connect_type) != 0) {
+	if (!native_sandbox_grant(service) && mac_iokit_check_open_service(kauth_cred_get(), service, connect_type) != 0) {
+		yunluo_open_note("gate-macf-open-service", service, (int)connect_type, 0, 0);
 		return kIOReturnNotPermitted;
 	}
 #endif
 	do{
 		if (properties) {
+			yunluo_open_note("gate-properties-nonnull", service, 0, 0, 0);
 			return kIOReturnUnsupported;
 		}
 #if 0
@@ -4393,6 +4497,8 @@ is_io_service_open_extended(
 #endif
 		res = service->newUserClient( owningTask, (void *) owningTask,
 		    connect_type, propertiesDict, &client );
+		yunluo_open_note("dispatch", service, (int)res,
+		    client ? 1 : 0, (int)connect_type);
 
 		if (propertiesDict) {
 			propertiesDict->release();
@@ -4512,7 +4618,9 @@ is_io_service_open_extended(
 				res = kIOReturnNotPrivileged;
 			}
 #if CONFIG_MACF
-			else if (0 != mac_iokit_check_open(kauth_cred_get(), client, connect_type)) {
+			/* The service's grant (native_sandbox_grant) stands in for the sandbox's verdict on the render server's open. */
+			else if (!native_sandbox_grant(service)
+			    && 0 != mac_iokit_check_open(kauth_cred_get(), client, connect_type)) {
 				IOLog("IOUC %s failed MACF in process %s\n",
 				    client->getMetaClass()->getClassName(), creatorNameCStr);
 				res = kIOReturnNotPermitted;
@@ -4520,6 +4628,7 @@ is_io_service_open_extended(
 #endif
 
 			if ((kIOReturnSuccess == res)
+			    && !native_sandbox_grant(service)
 			    && gIOUCFilterCallbacks
 			    && gIOUCFilterCallbacks->io_filter_resolver) {
 				io_filter_policy_t filterPolicy;
@@ -4610,6 +4719,22 @@ is_io_connect_get_service(
 	return theService ? kIOReturnSuccess : kIOReturnUnsupported;
 }
 
+static void
+yunluo_hid_api_note(IOUserClient *client, const char *operation, uint32_t selector,
+    IOReturn status, uint64_t a, uint64_t b)
+{
+	if (!client->metaCast("IOHIDEventServiceUserClient")) {
+		return;
+	}
+	static unsigned count;
+	const unsigned n = __atomic_fetch_add(&count, 1u, __ATOMIC_RELAXED);
+	if (n < 64) {
+		kprintf("YUNLUO-HIDAPI %s client=%p pid=%d sel=%u status=%08x a=%llu b=%llu\n",
+		    operation, client, proc_selfpid(), selector, (unsigned)status,
+		    (unsigned long long)a, (unsigned long long)b);
+	}
+}
+
 /* Routine io_connect_set_notification_port */
 kern_return_t
 is_io_connect_set_notification_port(
@@ -4627,6 +4752,7 @@ is_io_connect_set_notification_port(
 	ret = client->registerNotificationPort( port, notification_type,
 	    (io_user_reference_t) reference );
 	client->ipcExit(kIPCLockWrite);
+	yunluo_hid_api_note(client, "notify32", notification_type, ret, port != MACH_PORT_NULL, 0);
 
 	return ret;
 }
@@ -4648,6 +4774,7 @@ is_io_connect_set_notification_port_64(
 	ret = client->registerNotificationPort( port, notification_type,
 	    reference );
 	client->ipcExit(kIPCLockWrite);
+	yunluo_hid_api_note(client, "notify64", notification_type, ret, port != MACH_PORT_NULL, 0);
 
 	return ret;
 }
@@ -4711,6 +4838,7 @@ is_io_connect_map_memory_into_task
 
 	client->ipcExit(client->defaultLocking ? kIPCLockWrite : kIPCLockNone);
 
+	yunluo_hid_api_note(client, "map", memory_type, err, size ? *size : 0, flags);
 	return err;
 }
 
@@ -6435,6 +6563,9 @@ IOUserClient::callExternalMethod(uint32_t selector, IOExternalMethodArguments * 
 	}
 	ipcExit(defaultLocking ? (defaultLockingSingleThreadExternalMethod ? kIPCLockWrite : kIPCLockRead) : kIPCLockNone);
 
+	yunluo_hid_api_note(this, uc2022 ? "method2022" : "method", selector, ret,
+	    args->scalarInputCount,
+	    args->scalarInputCount && args->scalarInput ? args->scalarInput[0] : 0);
 	return ret;
 }
 
@@ -6693,3 +6824,66 @@ OSMetaClassDefineReservedUnused(IOUserClient2022, 0);
 OSMetaClassDefineReservedUnused(IOUserClient2022, 1);
 OSMetaClassDefineReservedUnused(IOUserClient2022, 2);
 OSMetaClassDefineReservedUnused(IOUserClient2022, 3);
+
+#if DEVELOPMENT || DEBUG
+extern "C" {
+volatile uint32_t native_mobile_graphics_abstract_null_mask;
+volatile uint64_t native_mobile_graphics_client_object;
+volatile uint64_t native_mobile_graphics_client_vptr;
+volatile uint64_t native_mobile_graphics_client_meta;
+volatile uint32_t native_mobile_graphics_client_size;
+volatile int native_mobile_graphics_client_init = -1;
+volatile uint32_t native_mobile_graphics_client_results[3] = {~0U, ~0U, ~0U};
+volatile int native_mobile_graphics_client_released;
+
+__attribute__((noinline)) void
+native_mobile_graphics_client_checkpoint(void)
+{
+	__asm__ volatile("" ::: "memory");
+}
+
+void
+native_mobile_graphics_client_probe(void)
+{
+	const char *abstract_names[] = {"IOMobileFramebuffer", "IOMobileFramebufferService", "IOMobileFramebufferLegacy"};
+	for (unsigned i = 0; i < 3; i++) {
+		OSObject *object = OSMetaClass::allocClassWithName(abstract_names[i]);
+		if (!object) {
+			native_mobile_graphics_abstract_null_mask |= 1U << i;
+		} else {
+			object->release();
+		}
+	}
+	OSObject *object = OSMetaClass::allocClassWithName("IOMobileFramebufferUserClient");
+	IOUserClient *client = OSDynamicCast(IOUserClient, object);
+	if (client) {
+		native_mobile_graphics_client_object = (uintptr_t)client;
+		native_mobile_graphics_client_vptr = *(const uintptr_t *)client;
+		native_mobile_graphics_client_meta = (uintptr_t)client->getMetaClass();
+		native_mobile_graphics_client_size = client->getMetaClass()->getClassSize();
+		native_mobile_graphics_client_init = client->init();
+		if (native_mobile_graphics_client_init) {
+			IOExternalMethodArguments arguments = {};
+			const uint32_t selectors[] = {90, 0x80000000U, ~0U};
+			for (unsigned i = 0; i < 3; i++) {
+				arguments.selector = selectors[i];
+				native_mobile_graphics_client_results[i] = client->externalMethod(selectors[i], &arguments, NULL, NULL, NULL);
+			}
+		}
+	}
+	if (object) {
+		object->release();
+		native_mobile_graphics_client_released = 1;
+	}
+	native_mobile_graphics_client_checkpoint();
+#if defined(XNU_NATIVE_MOBILE_DISPLAY) && XNU_NATIVE_MOBILE_DISPLAY
+	extern void native_mobile_display_provider_probe(void);
+	native_mobile_display_provider_probe();
+#endif
+#if defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
+	extern void native_legacy_display_probe(void);
+	native_legacy_display_probe();
+#endif
+}
+}
+#endif

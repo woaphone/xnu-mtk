@@ -1,3 +1,4 @@
+#include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
@@ -221,6 +222,7 @@ TUNABLE(startup_debug_t, startup_debug, "startup_debug", 0);
 static inline void
 kernel_bootstrap_log(const char *message)
 {
+	boot_progress_stage(message);
 	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
 	    startup_phase >= STARTUP_SUB_KPRINTF) {
 		kprintf("kernel_bootstrap: %s\n", message);
@@ -231,6 +233,7 @@ kernel_bootstrap_log(const char *message)
 static inline void
 kernel_bootstrap_thread_log(const char *message)
 {
+	boot_progress_stage(message);
 	if ((startup_debug & STARTUP_DEBUG_VERBOSE) &&
 	    startup_phase >= STARTUP_SUB_KPRINTF) {
 		kprintf("kernel_bootstrap_thread: %s\n", message);
@@ -470,10 +473,12 @@ kernel_bootstrap(void)
 		if (PE_parse_boot_argn("-show_pointers", &namep, sizeof(namep))) {
 			doprnt_hide_pointers = FALSE;
 		}
-		if (PE_parse_boot_argn("-no_slto_panic", &namep, sizeof(namep))) {
-			extern boolean_t spinlock_timeout_panic;
-			spinlock_timeout_panic = FALSE;
-		}
+	}
+	/* Owner device: honour -no_slto_panic without a debugger-enabled device policy. A thread that waits for an IPI acknowledgement
+	 * (restartable ranges) then keeps waiting instead of panicking the whole machine; the other cores keep running. */
+	if (PE_parse_boot_argn("-no_slto_panic", &namep, sizeof(namep))) {
+		extern boolean_t spinlock_timeout_panic;
+		spinlock_timeout_panic = FALSE;
 	}
 
 	kernel_bootstrap_log("console_init");
@@ -649,6 +654,7 @@ kernel_bootstrap_thread(void)
 	 */
 	kernel_bootstrap_thread_log("clock_service_create");
 	clock_service_create();
+	boot_progress_start();
 
 	/*
 	 *	Create the device service.
@@ -751,7 +757,7 @@ kernel_bootstrap_thread(void)
 	csm_initialize_provisioning_profiles();
 #endif
 
-#ifndef BCM2837
+#if !defined(BCM2837) || (defined(XNU_NATIVE_TRUST_CACHE) && XNU_NATIVE_TRUST_CACHE)
 	kernel_bootstrap_log("trust_cache_init");
 
 	/* Initialize the runtime for the trust cache interface */

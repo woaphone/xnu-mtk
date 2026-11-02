@@ -73,6 +73,11 @@ extern "C" {
 
 #include <libkern/OSKextLibPrivate.h>
 #include <libkern/c++/OSKext.h>
+
+#if CONFIG_MACF
+extern "C" int mac_late;
+extern "C" __attribute__((used)) const uint32_t native_prelink_security_init_version = 1;
+#endif
 #include <libkern/c++/OSLib.h>
 
 #include <IOKit/IOLib.h>
@@ -6821,6 +6826,8 @@ finish:
 		    kOSKextLogLoadFlag,
 		    "Kext %s failed to load (0x%x).",
 		    getIdentifierCString(), (int)result);
+		kprintf("YUNLUO: kext %s load rc=0x%x\n",
+		    getIdentifierCString(), (int)result);
 	} else if (!alreadyLoaded) {
 		OSKextLog(this,
 		    kOSKextLogProgressLevel |
@@ -8448,6 +8455,43 @@ OSKext::start(bool startDependenciesFlag)
 		result = startfunc(kmod_info, kmodStartData);
 	}
 
+	/* An explicitly linked security initializer must run with its real
+	 * dependencies and constructors ready, before MAC policy lockdown.
+	 * It executes original component code; no policy result is supplied.
+	 */
+	{
+		OSObject *earlyInitProperty = getPropertyForHostArch("_NativePrelinkEarlySecurityInit");
+		if (result == KERN_SUCCESS && earlyInitProperty != NULL) {
+	#if CONFIG_MACF
+			OSNumber *earlyInit = OSDynamicCast(OSNumber, earlyInitProperty);
+			uintptr_t target = 0;
+			bool executable = false;
+			if (!earlyInit || !isPrelinked() || mac_late ||
+			    getPropertyForHostArch("AppleSecurityExtension") != kOSBooleanTrue ||
+			    __builtin_add_overflow((uintptr_t)earlyInit->unsigned64BitValue(),
+			    vm_kernel_slide, &target) || (target & 3)) {
+				panic("NativePrelink: invalid early security initializer or phase");
+			}
+			kernel_mach_header_t *header = (kernel_mach_header_t *)kmod_info->address;
+			for (kernel_segment_command_t *seg = firstsegfromheader(header);
+			    seg != NULL; seg = nextsegfromheader(header, seg)) {
+				if (seg->initprot == (VM_PROT_READ | VM_PROT_EXECUTE) &&
+				    !(seg->maxprot & VM_PROT_WRITE) && seg->vmsize >= 4 &&
+				    target >= seg->vmaddr && target - seg->vmaddr <= seg->vmsize - 4) {
+					executable = true;
+					break;
+				}
+			}
+			if (!executable) {
+				panic("NativePrelink: early security initializer outside module code");
+			}
+			((void (*)(void))target)();
+	#else
+			panic("NativePrelink: early security initializer requires MAC framework");
+	#endif
+		}
+	}
+
 	flags.starting = 0;
 
 	/* On success overlap the setting of started/starting. On failure just
@@ -8474,6 +8518,10 @@ OSKext::start(bool startDependenciesFlag)
 	}
 
 finish:
+	if (result != kOSReturnSuccess) {
+		kprintf("YUNLUO: kext %s start rc=0x%x\n",
+		    getIdentifierCString(), result);
+	}
 	return result;
 }
 

@@ -18,7 +18,7 @@ INSTINC_SUBDIRS = crypto
 
 PRIVATE_DEFS = IOEventLink.iig IOWorkGroup.iig IOExtensiblePaniclog.iig
 
-ALL_DEFS = $(notdir $(wildcard $(SOURCE)*.iig))
+ALL_DEFS =
 PUBLIC_DEFS = $(filter-out $(PRIVATE_DEFS), $(ALL_DEFS))
 ALL_HDRS = $(notdir $(wildcard $(SOURCE)*.h))
 
@@ -40,6 +40,13 @@ INSTALL_DRIVERKIT_MI_LIST = $(PUBLIC_DEFS)
 INSTALL_DRIVERKIT_MI_LCL_LIST = $(PRIVATE_DEFS)
 
 OTHER_HEADERS = IOTypes.h IOReturn.h IORPC.h IOKitKeys.h \
+				OSObject.h IOLib.h IOService.h IOUserClient.h IOUserServer.h \
+				OSAction.h OSMetaClass.h IODispatchQueue.h IODispatchSource.h \
+				IOInterruptDispatchSource.h IODataQueueDispatchSource.h \
+				IOServiceNotificationDispatchSource.h IOServiceStateNotificationDispatchSource.h \
+				IOEventLink.h IOWorkGroup.h \
+				IOMemoryDescriptor.h IOMemoryMap.h IOBufferMemoryDescriptor.h \
+				IODMACommand.h IOExtensiblePaniclog.h \
 				IOKernelReportStructs.h IOReportTypes.h \
 				queue_implementation.h macro_help.h \
 				bounded_ptr.h bounded_array.h bounded_array_ref.h bounded_ptr_fwd.h \

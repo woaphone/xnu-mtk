@@ -924,8 +924,8 @@ public:
 	virtual bool               isLoadableInSafeBoot(void);
 	virtual bool               isPrelinked(void);
 	virtual bool               isLoaded(void);
-	virtual bool               isStarted(void);
-	virtual bool               isCPPInitialized(void);
+	bool                       isStarted(void);
+	bool                       isCPPInitialized(void);
 
 	const char *
 	getKCTypeString(void)

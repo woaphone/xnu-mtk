@@ -1,3 +1,4 @@
+#include <kern/boot_progress.h>
 /*
  * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
@@ -369,6 +370,7 @@ arm_init(
 #endif /* defined(HAS_APPLE_PAC) */
 
 	PE_init_platform(FALSE, args); /* Get platform expert set up */
+	boot_progress_init();
 
 #if __arm64__
 	configure_timer_apple_regs();
@@ -399,6 +401,10 @@ arm_init(
 
 
 	{
+		/* Native non-Apple 4K builds expose the hardware page size at any RAM size. */
+#if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+		PAGE_SHIFT_CONST = ARM_PGSHIFT;
+#else
 		/*
 		 * Select the advertised kernel page size.
 		 */
@@ -417,8 +423,14 @@ arm_init(
 			PAGE_SHIFT_CONST = ARM_PGSHIFT;
 		}
 
+#endif
+
+#if !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+		page_shift_user32 = ARM_PGSHIFT;
+#else
 		/* 32-bit apps always see 16KB page size */
 		page_shift_user32 = PAGE_MAX_SHIFT;
+#endif
 #ifdef  APPLETYPHOON
 		if (PE_parse_boot_argn("cpus_defeatures", &cpus_defeatures, sizeof(cpus_defeatures))) {
 			if ((cpus_defeatures & 0xF) != 0) {
@@ -519,7 +531,9 @@ arm_init(
 	__builtin_arm_wsr("pan", 1);
 #endif  /* __ARM_PAN_AVAILABLE__ */
 
+	boot_progress_stage("arm_vm_init enter");
 	arm_vm_init(xmaxmem, args);
+	boot_progress_stage("arm_vm_init returned");
 
 	if (debug_boot_arg) {
 		patch_low_glo();

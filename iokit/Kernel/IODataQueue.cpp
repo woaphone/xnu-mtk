@@ -275,9 +275,17 @@ IODataQueue::sendDataAvailableNotification()
 	mach_msg_header_t * msgh;
 
 	msgh = &((IODataQueueInternal *) notifyMsg)->msg;
+	const bool hidQueue = metaCast("IOHIDEventServiceQueue") != nullptr;
 	if (msgh->msgh_remote_port) {
 		kr = mach_msg_send_from_kernel_with_options(msgh, msgh->msgh_size,
 		    MACH64_SEND_TIMEOUT, MACH_MSG_TIMEOUT_NONE);
+		if (hidQueue) {
+			static unsigned notes;
+			if (__atomic_fetch_add(&notes, 1u, __ATOMIC_RELAXED) < 64) {
+				kprintf("YUNLUO-HIDQ notify queue=%p port=1 status=%08x\n",
+				    this, (unsigned)kr);
+			}
+		}
 		switch (kr) {
 		case MACH_SEND_TIMED_OUT: // Notification already sent
 		case MACH_MSG_SUCCESS:
@@ -286,6 +294,11 @@ IODataQueue::sendDataAvailableNotification()
 		default:
 			IOLog("%s: dataAvailableNotification failed - msg_send returned: %d\n", /*getName()*/ "IODataQueue", kr);
 			break;
+		}
+	} else if (hidQueue) {
+		static unsigned skipped;
+		if (__atomic_fetch_add(&skipped, 1u, __ATOMIC_RELAXED) < 8) {
+			kprintf("YUNLUO-HIDQ notify queue=%p port=0 skipped=1\n", this);
 		}
 	}
 }

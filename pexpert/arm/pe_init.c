@@ -102,7 +102,7 @@ void PE_slide_devicetree(vm_offset_t);
 static void
 check_for_panic_log(void)
 {
-#ifdef PLATFORM_PANIC_LOG_PADDR
+#if defined(PLATFORM_PANIC_LOG_PADDR) && !(defined(XNU_DT_PANIC_REGION) && XNU_DT_PANIC_REGION)
 	gPanicBase = ml_io_map_wcomb(PLATFORM_PANIC_LOG_PADDR, PLATFORM_PANIC_LOG_SIZE);
 	panic_text_len = PLATFORM_PANIC_LOG_SIZE - sizeof(struct embedded_panic_header);
 	gPanicSize = PLATFORM_PANIC_LOG_SIZE;
@@ -132,7 +132,10 @@ check_for_panic_log(void)
 		return;
 	}
 
-	if (kSuccess != SecureDTGetProperty(entry, "reg", (void const **)&reg_prop, &size)) {
+	if (kSuccess != SecureDTGetProperty(entry, "reg", (void const **)&reg_prop, &size) ||
+	    size != 2 * sizeof(*reg_prop) || !reg_prop[0] ||
+	    reg_prop[1] < sizeof(struct embedded_panic_header) ||
+	    reg_prop[0] > UINTPTR_MAX - reg_prop[1]) {
 		return;
 	}
 
@@ -140,11 +143,17 @@ check_for_panic_log(void)
 		return;
 	}
 
-	if (kSuccess != SecureDTGetProperty(chosen, "embedded-panic-log-size", (void const **) &panic_region_length, &size)) {
+	if (kSuccess != SecureDTGetProperty(chosen, "embedded-panic-log-size", (void const **) &panic_region_length, &size) ||
+	    size != sizeof(*panic_region_length) ||
+	    panic_region_length[0] < sizeof(struct embedded_panic_header) ||
+	    panic_region_length[0] > reg_prop[1]) {
 		return;
 	}
 
 	gPanicBase = ml_io_map_wcomb(reg_prop[0], panic_region_length[0]);
+	if (!gPanicBase) {
+		return;
+	}
 
 	/* Deduct the size of the panic header from the panic region size */
 	panic_text_len = panic_region_length[0] - sizeof(struct embedded_panic_header);
@@ -525,8 +534,15 @@ PE_create_console(void)
 	 */
 	check_for_panic_log();
 
+	/*
+	 * yunluo bring-up: always start the console in text mode. Graphics mode
+	 * leaves the video console disabled (gc_enabled == FALSE) until something
+	 * calls kPETextScreen, so every printf()/IOLog() during kernel boot was
+	 * discarded and the panel stayed black. Text mode keeps the kernel log on
+	 * the panel from PE_init_iokit onward.
+	 */
 	if (PE_state.video.v_display) {
-		PE_initialize_console(&PE_state.video, kPEGraphicsMode);
+		PE_initialize_console(&PE_state.video, kPETextMode);
 	} else {
 		PE_initialize_console(&PE_state.video, kPETextMode);
 	}
