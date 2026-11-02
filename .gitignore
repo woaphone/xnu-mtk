@@ -1,0 +1,15 @@
+# XNU 构建产物。源码树里跑 make 会产生这些，绝不能进库。
+BUILD/
+SETUP/
+*.o
+*.d
+*.dia
+*.dSYM/
+*.a
+*.unstripped
+*.noctf
+mach.*
+kernel.*
+kernelcache.*
+compile_commands.json
+.cache/
