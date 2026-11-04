@@ -191,12 +191,80 @@ uint32_t yunluo_log_copy(uint64_t *pos, char *out, uint32_t max);
  * store plus one atomic add; there is deliberately no lock, no allocation and
  * no division.
  */
+/*
+ * [k70u unx1 2026-11-05] Mirror console lines to pmsg ("K70U-CON: ...") so the
+ * kernel's own text (root wait, mount errors, panic text) survives a reboot even
+ * when nothing reaches the panel.  Same hot-path rules as the ring below: no
+ * allocation, no lock, never waits; a busy mirror drops the bytes.  k70u-con=0
+ * turns it off.
+ */
+#include <pexpert/pexpert.h>
+static char k70u_con_line[192];
+static uint32_t k70u_con_len;
+static volatile uint32_t k70u_con_busy;
+static int k70u_con_mode = -1;
+
+static void
+k70u_con_flush(void)
+{
+	char out[224];
+	uint32_t n = 0;
+	const char *prefix = "K70U-CON: ";
+	while (*prefix) {
+		out[n++] = *prefix++;
+	}
+	for (uint32_t i = 0; i < k70u_con_len; i++) {
+		out[n++] = k70u_con_line[i];
+	}
+	out[n++] = '\n';
+	out[n] = 0;
+	k70u_con_len = 0;
+	k70u_pmsg(out);
+}
+
+static void
+k70u_con_mirror(const char *c, int size)
+{
+	if (k70u_con_mode == 0) {
+		return;
+	}
+	if (!__sync_bool_compare_and_swap(&k70u_con_busy, 0, 1)) {
+		return;
+	}
+	if (k70u_con_mode < 0) {
+		uint32_t value = 1;
+		PE_parse_boot_argn("k70u-con", &value, sizeof(value));
+		k70u_con_mode = value ? 1 : 0;
+	}
+	if (k70u_con_mode == 1) {
+		for (int i = 0; i < size; i++) {
+			char ch = c[i];
+			if (ch == '\n') {
+				k70u_con_flush();
+				continue;
+			}
+			if (ch == '\r' || ch == 0) {
+				continue;
+			}
+			if ((unsigned char)ch < 0x20 && ch != '\t') {
+				ch = '.';
+			}
+			k70u_con_line[k70u_con_len++] = ch;
+			if (k70u_con_len >= sizeof(k70u_con_line) - 1) {
+				k70u_con_flush();
+			}
+		}
+	}
+	__sync_lock_release(&k70u_con_busy);
+}
+
 void
 yunluo_log_append(const char *c, int size)
 {
 	if (size <= 0) {
 		return;
 	}
+	k70u_con_mirror(c, size);
 	/* One call can carry a whole console line buffer.  Cap it so a huge print
 	 * cannot spend a long time here while kprintf holds its spinlock with
 	 * interrupts off -- and account for exactly what was copied, so the reader

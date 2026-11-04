@@ -219,6 +219,16 @@ void
 k70u_startup_event(const char *event, uint64_t subsystem, uint64_t rank,
     uint64_t function, uint64_t argument)
 {
+	/* [k70u unx1] ~4800 lines per boot wrapped the pmsg ring; opt-in now. */
+	static int k70u_callbacks = -1;
+	if (k70u_callbacks < 0) {
+		uint32_t value = 0;
+		PE_parse_boot_argn("k70u-callbacks", &value, sizeof(value));
+		k70u_callbacks = value ? 1 : 0;
+	}
+	if (!k70u_callbacks) {
+		return;
+	}
 	char out[384];
 	unsigned n = k70u_copy(out, 0, "K70U-CALLBACK3: ");
 	const uint64_t values[4] = {subsystem, rank, function, argument};

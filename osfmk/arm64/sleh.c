@@ -41,6 +41,8 @@
 
 #include <kern/debug.h>
 #include <kern/k70u_trace.h>
+/* [k70u unx1] IRQs taken, printed by the K70U-HB heartbeat. */
+volatile uint64_t k70u_irq_count;
 #include <kern/restartable.h>
 #include <kern/socd_client.h>
 #include <kern/task.h>
@@ -2516,6 +2518,7 @@ sleh_irq(arm_saved_state_t *state)
 		k70u_irq_state("sleh_irq without an installed handler");
 		panic("sleh_irq: IRQ taken before the platform interrupt provider installed a handler");
 	}
+	k70u_irq_count++;
 	static uint32_t k70u_irq_logged;
 	const uint32_t k70u_irq_first = k70u_irq_logged < 2;
 	if (k70u_irq_first) {

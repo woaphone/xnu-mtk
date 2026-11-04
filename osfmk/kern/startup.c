@@ -780,6 +780,8 @@ kernel_bootstrap_thread(void)
 	k70u_trace("bootstrap-thread-call", "initialize_screen enter");
 	initialize_screen(NULL, kPEAcquireScreen);
 	k70u_trace("bootstrap-thread-call", "initialize_screen returned");
+	/* [k70u unx1] command-mode DSI: start pushing console frames to the panel */
+	k70u_display_start();
 
 	/*
 	 *	Initialize the shared region module.

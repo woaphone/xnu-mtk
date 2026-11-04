@@ -1244,6 +1244,149 @@ gc_update_color(int color, boolean_t fore)
  * the framebuffer, the text console stops painting (logging goes to the ring). */
 int yunluo_video_console_frozen = 0;
 
+/*
+ * [k70u unx1 2026-11-05] rothko (MT6989) screen log.
+ *
+ * The panel is a command-mode DSI panel: pixels written to DRAM reach the glass
+ * only when a frame is pushed.  RothkoDisplayDxe pushes every 200 ms during UEFI
+ * (RothkoDisplayDxe.c Refresh/PushFrame); after the hand-off nothing does, so
+ * the XNU console was invisible.  The overlay LK programmed scans out two full
+ * screen layers; UEFI keeps them identical by copying L0 into L1 before each
+ * push, and so does this code:
+ *   L0 0xFD91F000 stride 4992 (the console framebuffer, boot_args video base)
+ *   L1 0xFE612000 stride 4880, 1220 x 2712 x 32 bpp
+ *   push: MUTEX_EN(id 0) = 1 at 0x14001020, 0x14201020, 0x14401020,
+ *         then DSI_START 0x1420A000 = 0, = 1.  No completion wait (as UEFI).
+ * Values are the ones RothkoDisplayDxe measured and logged on this device
+ * (reports/ufs2-userlog-20261104.txt).  k70u-dsi=0 disables all of it.
+ */
+#define K70U_FB_L0_PHYS   0xFD91F000ULL
+#define K70U_FB_L1_PHYS   0xFE612000ULL
+#define K70U_FB_WIDTH     1220U
+#define K70U_FB_HEIGHT    2712U
+#define K70U_FB_L0_ROW    4992U
+#define K70U_FB_L1_ROW    4880U
+static const uint64_t k70u_mutex_bank_phys[3] = {0x14001000ULL, 0x14201000ULL, 0x14401000ULL};
+#define K70U_DSI_START_PHYS 0x1420A000ULL
+
+static volatile uint32_t *k70u_dsi_start;
+static volatile uint32_t *k70u_mutex_en[3];
+static volatile uint8_t *k70u_fb_l0;
+static volatile uint8_t *k70u_fb_l1;
+static thread_call_data_t k70u_display_call;
+static volatile uint32_t k70u_display_dirty;
+static volatile int k70u_display_state;      /* 0 not started, 1 running, -1 refused */
+static uint32_t k70u_display_ms = 1000;
+static uint64_t k70u_display_pushes;
+static uint64_t k70u_display_hb_last;
+volatile uint32_t k70u_display_busy;
+
+static void
+k70u_display_push(void)
+{
+	if (k70u_display_state != 1) {
+		return;
+	}
+	if (!__sync_bool_compare_and_swap(&k70u_display_busy, 0, 1)) {
+		return;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	for (uint32_t row = 0; row < K70U_FB_HEIGHT; row++) {
+		const volatile uint64_t *src = (const volatile uint64_t *)(k70u_fb_l0 + (uint64_t)row * K70U_FB_L0_ROW);
+		volatile uint64_t *dst = (volatile uint64_t *)(k70u_fb_l1 + (uint64_t)row * K70U_FB_L1_ROW);
+		for (uint32_t i = 0; i < (K70U_FB_WIDTH * 4U) / 8U; i++) {
+			dst[i] = src[i];
+		}
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	for (int bank = 0; bank < 3; bank++) {
+		*k70u_mutex_en[bank] = 1;
+	}
+	__asm__ volatile ("dsb sy" ::: "memory");
+	*k70u_dsi_start = 0;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	*k70u_dsi_start = 1;
+	__asm__ volatile ("dsb sy" ::: "memory");
+	k70u_display_pushes++;
+	__sync_lock_release(&k70u_display_busy);
+}
+
+static void
+k70u_display_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+{
+	if (k70u_display_dirty) {
+		k70u_display_dirty = 0;
+		k70u_display_push();
+	}
+	uint64_t now = mach_absolute_time();
+	uint64_t ten_s = 0;
+	nanoseconds_to_absolutetime(10ULL * NSEC_PER_SEC, &ten_s);
+	if (now - k70u_display_hb_last >= ten_s) {
+		char line[160];
+		uint64_t ns = 0;
+		k70u_display_hb_last = now;
+		absolutetime_to_nanoseconds(now, &ns);
+		snprintf(line, sizeof(line), "K70U-HB: t=%llus irq=%llu push=%llu\n",
+		    (unsigned long long)(ns / NSEC_PER_SEC), (unsigned long long)k70u_irq_count,
+		    (unsigned long long)k70u_display_pushes);
+		k70u_pmsg(line);
+	}
+	uint64_t deadline = 0;
+	clock_interval_to_deadline(k70u_display_ms, NSEC_PER_MSEC, &deadline);
+	thread_call_enter_delayed(&k70u_display_call, deadline);
+}
+
+void
+k70u_display_start(void)
+{
+	uint32_t enabled = 1, ms = 1000;
+	char line[200];
+
+	if (k70u_display_state != 0) {
+		return;
+	}
+	PE_parse_boot_argn("k70u-dsi", &enabled, sizeof(enabled));
+	if (PE_parse_boot_argn("k70u-dsi-ms", &ms, sizeof(ms)) && ms >= 100 && ms <= 60000) {
+		k70u_display_ms = ms;
+	}
+	snprintf(line, sizeof(line), "K70U-DSI: console %ux%ux%u row=%u phys=0x%llx enabled=%u period=%ums\n",
+	    vinfo.v_width, vinfo.v_height, vinfo.v_depth, vinfo.v_rowbytes,
+	    (unsigned long long)vinfo.v_physaddr, enabled, k70u_display_ms);
+	k70u_pmsg(line);
+	if (enabled == 0 || vinfo.v_width != K70U_FB_WIDTH || vinfo.v_height != K70U_FB_HEIGHT ||
+	    vinfo.v_depth != 32 || vinfo.v_rowbytes != K70U_FB_L0_ROW) {
+		k70u_display_state = -1;
+		k70u_pmsg("K70U-DSI: push disabled (boot-arg or console geometry)\n");
+		return;
+	}
+	k70u_dsi_start = (volatile uint32_t *)ml_io_map(K70U_DSI_START_PHYS, PAGE_SIZE);
+	for (int bank = 0; bank < 3; bank++) {
+		vm_offset_t va = ml_io_map(k70u_mutex_bank_phys[bank], PAGE_SIZE);
+		k70u_mutex_en[bank] = va ? (volatile uint32_t *)(va + 0x20) : NULL;
+	}
+	k70u_fb_l0 = (volatile uint8_t *)ml_io_map_wcomb(K70U_FB_L0_PHYS,
+	    round_page((vm_size_t)K70U_FB_L0_ROW * K70U_FB_HEIGHT));
+	k70u_fb_l1 = (volatile uint8_t *)ml_io_map_wcomb(K70U_FB_L1_PHYS,
+	    round_page((vm_size_t)K70U_FB_L1_ROW * K70U_FB_HEIGHT));
+	if (!k70u_dsi_start || !k70u_mutex_en[0] || !k70u_mutex_en[1] || !k70u_mutex_en[2] ||
+	    !k70u_fb_l0 || !k70u_fb_l1) {
+		k70u_display_state = -1;
+		k70u_pmsg("K70U-DSI: mapping failed, push disabled\n");
+		return;
+	}
+	thread_call_setup(&k70u_display_call, k70u_display_tick, NULL);
+	k70u_display_state = 1;
+	k70u_display_dirty = 0;
+	k70u_display_push();
+	k70u_display_hb_last = mach_absolute_time();
+	snprintf(line, sizeof(line), "K70U-DSI: push running, first push done (pushes=%llu)\n",
+	    (unsigned long long)k70u_display_pushes);
+	k70u_pmsg(line);
+	uint64_t deadline = 0;
+	clock_interval_to_deadline(k70u_display_ms, NSEC_PER_MSEC, &deadline);
+	thread_call_enter_delayed(&k70u_display_call, deadline);
+}
+
 void
 vcputc_options(char c, __unused bool poll)
 {
@@ -1262,6 +1405,11 @@ vcputc_options(char c, __unused bool poll)
 		abandon_preemption_disable_measurement();
 #endif /* SCHED_HYGIENE_DEBUG */
 		VCPUTC_LOCK_UNLOCK();
+		/* [k70u unx1] the panel only shows pushed frames */
+		k70u_display_dirty = 1;
+		if (c == '\n' && k70u_display_state == 1 && panic_active()) {
+			k70u_display_push();
+		}
 	}
 }
 
