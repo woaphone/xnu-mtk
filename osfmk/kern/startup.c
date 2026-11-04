@@ -769,6 +769,7 @@ kernel_bootstrap_thread(void)
 	// Reset interrupts masked timeout before we enable interrupts
 	ml_spin_debug_clear_self();
 #endif
+	k70u_irq_state("spllo enter");
 	k70u_trace("bootstrap-thread-call", "spllo enter");
 	(void) spllo();
 	k70u_trace("bootstrap-thread-call", "spllo returned");         /* Allow interruptions */

@@ -901,6 +901,10 @@ ml_install_interrupt_handler(
 	cpu_data_ptr->interrupt_handler = handler;
 	cpu_data_ptr->interrupt_refCon = refCon;
 
+	/* [k70u irq5] proves the platform provider reached handler installation */
+	k70u_irq_hex("install handler", (uint64_t)(uintptr_t)handler);
+	k70u_irq_hex("install source", (uint64_t)(uint32_t)source);
+
 	(void) ml_set_interrupts_enabled(current_state);
 }
 

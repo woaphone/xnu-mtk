@@ -2507,11 +2507,29 @@ sleh_irq(arm_saved_state_t *state)
 #if USE_APPLEARMSMP
 	PE_handle_ext_interrupt();
 #else
+	/*
+	 * [k70u irq5] No IRQ may be taken before the platform interrupt provider
+	 * (ArmCpu) installs its handler.  Record which interrupt broke that
+	 * contract instead of branching to address 0.
+	 */
+	if (__improbable(cdp->interrupt_handler == NULL)) {
+		k70u_irq_state("sleh_irq without an installed handler");
+		panic("sleh_irq: IRQ taken before the platform interrupt provider installed a handler");
+	}
+	static uint32_t k70u_irq_logged;
+	const uint32_t k70u_irq_first = k70u_irq_logged < 2;
+	if (k70u_irq_first) {
+		k70u_irq_hex("dispatch handler", (uint64_t)(uintptr_t)cdp->interrupt_handler);
+	}
 	/* Run the registered interrupt handler. */
 	cdp->interrupt_handler(cdp->interrupt_target,
 	    cdp->interrupt_refCon,
 	    cdp->interrupt_nub,
 	    cdp->interrupt_source);
+	if (k70u_irq_first) {
+		k70u_irq_logged++;
+		k70u_trace("IRQ5 dispatch", "handler returned");
+	}
 #endif
 
 	entropy_collect();

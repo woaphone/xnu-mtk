@@ -232,6 +232,78 @@ k70u_startup_event(const char *event, uint64_t subsystem, uint64_t rank,
 	out[n++] = '\n'; out[n] = 0; k70u_pmsg(out);
 }
 
+/*
+ * [k70u irq5 2026-11-05] GIC hand-off contract.
+ *
+ * DarwinBoot enters the kernel without ExitBootServices, so ArmGicDxe and
+ * ArmTimerDxe never run their exit handlers: ICC_IGRPEN1_EL1 stays 1 and the
+ * firmware timer PPIs stay enabled.  fiq_context_init() then enables CNTV
+ * (PPI 27) and the first spllo() takes it in sleh_irq() before ArmCpu has
+ * installed cpu_data->interrupt_handler (trace4: pc=0 after _sleh_irq blr x8).
+ * Restore the exit-boot-services state on the boot CPU: Group 1 signalling
+ * stays off until ArmCpu::enableGic() sets ICC_IGRPEN1_EL1 again, which it
+ * does only after enableCPUInterrupt() installed its handler.
+ *
+ * ICC registers use their generic encodings:
+ *   ICC_SRE_EL1     S3_0_C12_C12_5    ICC_IGRPEN1_EL1 S3_0_C12_C12_7
+ *   ICC_HPPIR1_EL1  S3_0_C12_C12_2    ICC_PMR_EL1     S3_0_C4_C6_0
+ * They are touched only when ICC_SRE_EL1.SRE is 1 (system-register access).
+ */
+void
+k70u_irq_hex(const char *name, uint64_t value)
+{
+	char out[112];
+	const char *prefix = "K70U-IRQ5: ";
+	unsigned n = 0;
+	while (*prefix) out[n++] = *prefix++;
+	if (name) while (*name && n < 80) out[n++] = *name++;
+	out[n++] = '='; out[n++] = '0'; out[n++] = 'x';
+	for (int shift = 60; shift >= 0; shift -= 4)
+		out[n++] = "0123456789abcdef"[(value >> shift) & 15];
+	out[n++] = '\n'; out[n] = 0;
+	k70u_pmsg(out);
+}
+
+void
+k70u_irq_state(const char *where)
+{
+	uint64_t value;
+
+	k70u_trace("IRQ5 state", where);
+	__asm__ volatile ("mrs %0, S3_0_C12_C12_5" : "=r"(value));
+	k70u_irq_hex("icc_sre", value);
+	if ((value & 1) != 0) {
+		__asm__ volatile ("mrs %0, S3_0_C12_C12_7" : "=r"(value));
+		k70u_irq_hex("icc_igrpen1", value);
+		__asm__ volatile ("mrs %0, S3_0_C4_C6_0" : "=r"(value));
+		k70u_irq_hex("icc_pmr", value);
+		__asm__ volatile ("mrs %0, S3_0_C12_C12_2" : "=r"(value));
+		k70u_irq_hex("icc_hppir1", value);
+	}
+	__asm__ volatile ("mrs %0, CNTV_CTL_EL0" : "=r"(value));
+	k70u_irq_hex("cntv_ctl", value);
+	__asm__ volatile ("mrs %0, CNTP_CTL_EL0" : "=r"(value));
+	k70u_irq_hex("cntp_ctl", value);
+	__asm__ volatile ("mrs %0, DAIF" : "=r"(value));
+	k70u_irq_hex("daif", value);
+}
+
+static void
+k70u_gic_handoff_quiesce(void)
+{
+	uint64_t sre;
+
+	k70u_irq_state("arm_init firmware hand-off");
+	__asm__ volatile ("mrs %0, S3_0_C12_C12_5" : "=r"(sre));
+	if ((sre & 1) == 0) {
+		k70u_trace("IRQ5 quiesce", "skipped: ICC_SRE_EL1.SRE=0");
+		return;
+	}
+	__asm__ volatile ("msr S3_0_C12_C12_7, xzr\n\tisb" ::: "memory");
+	k70u_trace("IRQ5 quiesce", "ICC_IGRPEN1_EL1 cleared before fiq_context_init");
+	k70u_irq_state("arm_init after quiesce");
+}
+
 /* Enabled only once arm_vm_init() has run - before that ml_io_map() is unsafe. */
 static void
 k70u_beacon_on(void)
@@ -799,6 +871,8 @@ arm_init(
 #endif /* KPERF */
 
 	PE_init_cpu();
+	/* [k70u irq5] Group 1 off before CNTV is enabled; ArmCpu re-enables it. */
+	k70u_gic_handoff_quiesce();
 	fiq_context_init(TRUE);
 
 
