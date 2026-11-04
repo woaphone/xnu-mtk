@@ -44,6 +44,46 @@
 
 
 
+
+// rothko cold-boot pmsg append. x0, x19-x26, LR and SCTLR value are preserved.
+// Scratch: x9-x13, x27-x28. The 12-byte header matches Linux ramoops.
+.macro K70U_EARLY_PMSG stage
+	movz x27, #0x480f, lsl #16
+	ldr w9, [x27]
+	movz w10, #0x4244
+	movk w10, #0x4347, lsl #16
+	cmp w9, w10
+	b.ne 90f
+	movz w11, #0xfff4
+	movk w11, #7, lsl #16
+	ldr w9, [x27, #4]
+	ldr w10, [x27, #8]
+	cmp w9, w11
+	b.hs 90f
+	cmp w10, w11
+	b.hi 90f
+	movz w28, #(0x304b + (\stage << 8))
+	movk w28, #0x0a0d, lsl #16
+	mov w13, #4
+91:
+	add x12, x27, #12
+	strb w28, [x12, x9]
+	lsr w28, w28, #8
+	add w9, w9, #1
+	cmp w9, w11
+	csel w9, wzr, w9, eq
+	add w10, w10, #1
+	cmp w10, w11
+	csel w10, w11, w10, hi
+	subs w13, w13, #1
+	b.ne 91b
+	dsb sy
+	str w9, [x27, #4]
+	str w10, [x27, #8]
+	dsb sy
+90:
+.endmacro
+
 .macro MSR_VBAR_EL1_X0
 #if defined(KERNEL_INTEGRITY_KTRR)
 	mov	x1, lr
@@ -464,18 +504,7 @@ start_cpu:
 	.globl EXT(start_first_cpu)
 LEXT(start_first_cpu)
 
-	//
-	// [k70u 2026-11-04] Entry beacons.  The hand-off reaches this entry point,
-	// but the only thing that ever came back afterwards was UEFI's own
-	// exception dump, so nothing here could be observed.  Stamp a tag into the
-	// tail of the MTK pmsg region (0x480F0000 + 0x7FC00, past the ring data)
-	// before touching any system register: if "K1" never shows up, the jump
-	// itself is bad.
-	//
-	movz	x27, #0x4816, lsl #16			// 0x4816FC00 = pmsg + 0x7FC00
-	movk	x27, #0xFC00
-	movz	w28, #0x314B					// "K1"
-	str	w28, [x27]
+	K70U_EARLY_PMSG 1
 
 	// Unlock the core for debugging
 	msr		OSLAR_EL1, xzr
@@ -489,8 +518,7 @@ LEXT(start_first_cpu)
 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
 	MSR_VBAR_EL1_X0
 
-	movz	w28, #0x324B					// "K2": low reset vectors installed
-	str	w28, [x27, #4]
+	K70U_EARLY_PMSG 2
 
 
 	// Get the kernel memory parameters from the boot args
@@ -773,11 +801,9 @@ common_start:
 1:
 	MSR_VBAR_EL1_X0
 
-	movz	x27, #0x4816, lsl #16			// reload: bl set_mmu_ttb clobbers x27
-	movk	x27, #0xFC00
-	movz	w28, #0x334B					// "K3": real exception vectors installed
-	str	w28, [x27, #8]
-
+	cbnz x21, 89f
+	K70U_EARLY_PMSG 3
+89:
 
 #if HAS_APPLE_PAC
 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
@@ -785,11 +811,9 @@ common_start:
 
 	// Enable caches, MMU, ROP and JOP
 	MOV64   x0, SCTLR_EL1_DEFAULT
-	movz	x27, #0x4816, lsl #16			// reload: PAC/MOV64 clobber above
-	movk	x27, #0xFC00
-	movz	w28, #0x344B					// "K4": MMU about to be enabled
-	str	w28, [x27, #12]
-	dsb		sy
+	cbnz x21, 89f
+	K70U_EARLY_PMSG 4
+89:
 	MSR_SCTLR_EL1_X0
 	isb		sy
 
