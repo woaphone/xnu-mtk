@@ -77,6 +77,102 @@
 
 #include <pexpert/pexpert.h>
 
+/*
+ * [k70u 2026-11-04] Early boot beacons.
+ *
+ * The rothko panel is command-mode DSI, so nothing the kernel draws reaches the
+ * glass, and after the hand-off UEFI's console is gone.  The one sink that
+ * survives a crash is the MTK pmsg ring in DRAM: Android reads it back through
+ * /sys/fs/pstore/pmsg-ramoops-0 after the watchdog resets the board.  Append
+ * plain ASCII there so the next boot can say how far the kernel got.
+ *
+ * Layout is FrameBufferSerialPortLib's: 0x480F0000, three words of header
+ * (signature, start, size) then a circular text buffer of size-12 bytes.
+ */
+#define K70U_PMSG_PHYS   0x480F0000ULL
+#define K70U_PMSG_SIZE   0x00080000U
+#define K70U_PMSG_SIG    0x43474244U
+#define K70U_PMSG_HDR    12U
+
+static vm_offset_t k70u_pmsg_va;
+static boolean_t k70u_beacon_ready;
+
+static void
+k70u_beacon(const char *msg)
+{
+	volatile uint32_t *hdr;
+	volatile uint8_t  *data;
+	uintptr_t          capacity;
+	uintptr_t          len;
+	uintptr_t          start;
+	uintptr_t          count;
+	uintptr_t          first;
+
+	if (!k70u_beacon_ready) {
+		return;
+	}
+	if (k70u_pmsg_va == 0) {
+		k70u_pmsg_va = ml_io_map((vm_offset_t)K70U_PMSG_PHYS, K70U_PMSG_SIZE);
+		if (k70u_pmsg_va == 0) {
+			return;
+		}
+	}
+
+	hdr      = (volatile uint32_t *)k70u_pmsg_va;
+	data     = (volatile uint8_t *)(k70u_pmsg_va + K70U_PMSG_HDR);
+	capacity = K70U_PMSG_SIZE - K70U_PMSG_HDR;
+
+	if ((hdr[0] != K70U_PMSG_SIG) || ((int32_t)hdr[1] < 0) ||
+	    ((uint32_t)hdr[1] >= capacity) || ((int32_t)hdr[2] < 0) ||
+	    ((uint32_t)hdr[2] > capacity)) {
+		hdr[0] = K70U_PMSG_SIG;
+		hdr[1] = 0;
+		hdr[2] = 0;
+	}
+
+	len = 0;
+	while (msg[len] != '\0') {
+		len++;
+	}
+	if (len == 0) {
+		return;
+	}
+	if (len > capacity) {
+		msg += len - capacity;
+		len  = capacity;
+	}
+
+	count = len;
+	if ((uintptr_t)hdr[2] < capacity) {
+		uintptr_t grown = (uintptr_t)hdr[2] + count;
+		hdr[2] = (uint32_t)((grown > capacity) ? capacity : grown);
+	}
+
+	start = (uintptr_t)hdr[1];
+	hdr[1] = (uint32_t)((start + count) % capacity);
+
+	first = capacity - start;
+	if (first > count) {
+		first = count;
+	}
+	for (uintptr_t i = 0; i < first; i++) {
+		data[start + i] = (uint8_t)msg[i];
+	}
+	for (uintptr_t i = first; i < count; i++) {
+		data[i - first] = (uint8_t)msg[i];
+	}
+
+	__asm__ volatile("dsb sy" ::: "memory");
+}
+
+/* Enabled only once arm_vm_init() has run - before that ml_io_map() is unsafe. */
+static void
+k70u_beacon_on(void)
+{
+	k70u_beacon_ready = TRUE;
+}
+
+
 #include <console/serial_protos.h>
 
 #if CONFIG_TELEMETRY
@@ -535,6 +631,11 @@ arm_init(
 	arm_vm_init(xmaxmem, args);
 	boot_progress_stage("arm_vm_init returned");
 
+	// [k70u] The kernel now has a real pmap, so the pmsg ring can be mapped and
+	// every stage from here on is recorded where Android can read it back.
+	k70u_beacon_on();
+	k70u_beacon("K70U-KERNEL: arm_vm_init ok\n");
+
 	if (debug_boot_arg) {
 		patch_low_glo();
 	}
@@ -545,10 +646,13 @@ arm_init(
 
 	PE_consistent_debug_inherit();
 
+	k70u_beacon("K70U-KERNEL: serial_init enter\n");
 	/* Setup debugging output. */
 	const unsigned int serial_exists = serial_init();
 	kernel_startup_initialize_upto(STARTUP_SUB_KPRINTF);
 	kprintf("kprintf initialized\n");
+	k70u_beacon(serial_exists ? "K70U-KERNEL: kprintf up, serial=1\n"
+	                          : "K70U-KERNEL: kprintf up, serial=0\n");
 
 	serialmode = 0;
 	if (PE_parse_boot_argn("serial", &serialmode, sizeof(serialmode))) {
