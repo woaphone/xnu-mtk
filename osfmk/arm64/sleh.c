@@ -40,6 +40,7 @@
 #include <arm64/instructions.h>
 
 #include <kern/debug.h>
+#include <kern/k70u_trace.h>
 #include <kern/restartable.h>
 #include <kern/socd_client.h>
 #include <kern/task.h>
@@ -471,6 +472,26 @@ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
 
 	ss_valid = is_saved_state64(ss);
 	arm_saved_state64_t *state = saved_state64(ss);
+
+	/* Capture real saved values before the general panic formatter/debugger. */
+	k70u_trace("EXCEPTION4 message", msg);
+	k70u_trace_hex("saved_state", (uint64_t)(uintptr_t)ss);
+	k70u_trace_hex("valid64", (uint64_t)ss_valid);
+	if (ss_valid) {
+		k70u_trace_hex("pc", state->pc);
+		k70u_trace_hex("lr", state->lr);
+		k70u_trace_hex("sp", state->sp);
+		k70u_trace_hex("fp", state->fp);
+		k70u_trace_hex("cpsr", state->cpsr);
+		k70u_trace_hex("esr", state->esr);
+		k70u_trace_hex("far", state->far);
+		for (unsigned i = 0; i < 29; i++) {
+			char name[4] = {'x', 0, 0, 0};
+			if (i >= 10) { name[1] = '0' + i / 10; name[2] = '0' + i % 10; }
+			else name[1] = '0' + i;
+			k70u_trace_hex(name, state->x[i]);
+		}
+	}
 
 	os_atomic_cmpxchg(&original_faulting_state, NULL, state, seq_cst);
 

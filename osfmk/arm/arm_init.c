@@ -199,6 +199,22 @@ k70u_trace(const char *scope, const char *stage)
 	out[n++] = '\n'; out[n] = 0; k70u_pmsg(out);
 }
 
+/* Exception-safe numeric output: no allocation, printf or scheduler locks. */
+void
+k70u_trace_hex(const char *name, uint64_t value)
+{
+	char out[112];
+	const char *prefix = "K70U-EXCEPTION4: ";
+	unsigned n = 0;
+	while (*prefix) out[n++] = *prefix++;
+	if (name) while (*name && n < 80) out[n++] = *name++;
+	out[n++] = '='; out[n++] = '0'; out[n++] = 'x';
+	for (int shift = 60; shift >= 0; shift -= 4)
+		out[n++] = "0123456789abcdef"[(value >> shift) & 15];
+	out[n++] = '\n'; out[n] = 0;
+	k70u_pmsg(out);
+}
+
 void
 k70u_startup_event(const char *event, uint64_t subsystem, uint64_t rank,
     uint64_t function, uint64_t argument)
