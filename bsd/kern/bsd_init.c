@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 #include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2021 Apple Inc. All rights reserved.
@@ -1297,7 +1298,9 @@ kern_return_t
 bsd_autoconf(void)
 {
 	kprintf("bsd_autoconf: calling kminit\n");
+	k70u_trace("kminit", "enter");
 	kminit();
+	k70u_trace("kminit", "returned");
 
 	/*
 	 * Early startup for bsd pseudodevices.
@@ -1310,7 +1313,9 @@ bsd_autoconf(void)
 		}
 	}
 
+	k70u_trace("bsd_autoconf", "IOKitBSDInit call");
 	kern_return_t result = IOKitBSDInit();
+	k70u_trace("bsd_autoconf", "IOKitBSDInit returned");
 #if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
 	/* The original IOSurface personality requires the genuine IOBSD resource.
 	 * The default-off framebuffer instrument may start only after publication.

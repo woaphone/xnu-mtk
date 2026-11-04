@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 /*
  * Copyright (c) 1998-2021 Apple Inc. All rights reserved.
  *
@@ -110,7 +111,9 @@ thread_call_t corefile_open_call = NULL;
 kern_return_t
 IOKitBSDInit( void )
 {
+	k70u_trace("IOBSD", "publishResource enter");
 	IOService::publishResource("IOBSD");
+	k70u_trace("IOBSD", "publishResource returned");
 
 #if IOPOLLED_COREFILE
 	corefile_open_call = thread_call_allocate_with_options(IOOpenPolledCoreFile, NULL, THREAD_CALL_PRIORITY_KERNEL, THREAD_CALL_OPTIONS_ONCE);
@@ -731,6 +734,7 @@ kern_return_t
 IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
     dev_t * root, u_int32_t * oflags )
 {
+	k70u_trace("IOFindBSDRoot", "entered");
 	mach_timespec_t     t;
 	IOService *         service;
 	IORegistryEntry *   regEntry;

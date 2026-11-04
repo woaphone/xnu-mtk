@@ -115,6 +115,7 @@ PRIVATE_EXPORT_FILES = \
 
 XNU_ONLY_EXPORTS = \
 	boot_progress.h \
+	k70u_trace.h \
 	arcade.h \
 	btlog.h \
 	cpc.h \

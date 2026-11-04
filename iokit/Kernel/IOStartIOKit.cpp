@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 /*
  * Copyright (c) 1998-2010 Apple Inc. All rights reserved.
  *
@@ -133,6 +134,7 @@ void (*record_startup_extensions_function)(void) = NULL;
 void
 InitIOKit(void *dtTop)
 {
+	k70u_trace("InitIOKit", "entered");
 	// Compat for boot-args
 	gIOKitTrace |= (gIOKitDebug & kIOTraceCompatBootArgs);
 
@@ -143,43 +145,61 @@ InitIOKit(void *dtTop)
 	// of iokit basic service initialisation, or better we have IOLib stuff
 	// initialise as basic OS services.
 	//
+	k70u_trace("IOKit-call", "IOLibInit(); enter");
 	IOLibInit();
+	k70u_trace("IOKit-call", "IOLibInit(); returned");
+	k70u_trace("IOKit-call", "OSlibkernInit(); enter");
 	OSlibkernInit();
+	k70u_trace("IOKit-call", "OSlibkernInit(); returned");
+	k70u_trace("IOKit-call", "IOMachPortInitialize(); enter");
 	IOMachPortInitialize();
+	k70u_trace("IOKit-call", "IOMachPortInitialize(); returned");
 
 	gIOProgressBackbufferKey  = OSSymbol::withCStringNoCopy(kIOProgressBackbufferKey);
 	gIORemoveOnReadProperties = OSSet::withObjects((const OSObject **) &gIOProgressBackbufferKey, 1);
 
+	k70u_trace("IOKit-call", "interruptAccountingInit(); enter");
 	interruptAccountingInit();
+	k70u_trace("IOKit-call", "interruptAccountingInit(); returned");
 
 	gRootNub = new IOPlatformExpertDevice;
 	if (__improbable(gRootNub == NULL)) {
 		panic("Failed to allocate IOKit root nub");
 	}
+	k70u_trace("IOKit", "gRootNub->init(dtTop); enter");
 	bool ok = gRootNub->init(dtTop);
+	k70u_trace("IOKit result", ok ? "true" : "false");
 	if (__improbable(!ok)) {
 		panic("Failed to initialize IOKit root nub");
 	}
+	k70u_trace("IOKit-call", "gRootNub->attach(NULL); enter");
 	gRootNub->attach(NULL);
+	k70u_trace("IOKit-call", "gRootNub->attach(NULL); returned");
 
 	/* If the bootstrap segment set up a function to record startup
 	 * extensions, call it now.
 	 */
 	if (record_startup_extensions_function) {
-		record_startup_extensions_function();
+		k70u_trace("IOKit-call", "record_startup_extensions_function(); enter");
+	record_startup_extensions_function();
+	k70u_trace("IOKit-call", "record_startup_extensions_function(); returned");
 	}
 }
 
 void
 ConfigureIOKit(void)
 {
+	k70u_trace("ConfigureIOKit", "entered");
 	assert(gRootNub != NULL);
+	k70u_trace("IOKit-call", "gRootNub->configureDefaults(); enter");
 	gRootNub->configureDefaults();
+	k70u_trace("IOKit-call", "gRootNub->configureDefaults(); returned");
 }
 
 void
 StartIOKitMatching(void)
 {
+	k70u_trace("StartIOKitMatching", "entered");
 	SOCD_TRACE_XNU(START_IOKIT);
 	assert(gRootNub != NULL);
 	/*
@@ -196,7 +216,9 @@ StartIOKitMatching(void)
 		IOLog("YUNLUO-PLAT: root name=%s model=%.48s compatible=%.96s\n",
 		    gRootNub->getName(), modelStr, compatStr);
 	}
+	k70u_trace("IOKit", "gRootNub->startIOServiceMatching(); enter");
 	bool ok = gRootNub->startIOServiceMatching();
+	k70u_trace("IOKit result", ok ? "true" : "false");
 	if (__improbable(!ok)) {
 		panic("Failed to start IOService matching");
 	}

@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 /*
  * Copyright (c) 2007-2021 Apple Inc. All rights reserved.
  *
@@ -1418,7 +1419,9 @@ machine_conf(void)
 
 	// rdar://problem/58285685: Userland expects _COMM_PAGE_LOGICAL_CPUS to report
 	// (max_cpu_id+1) rather than a literal *count* of logical CPUs.
+	k70u_trace("machine_conf topology", "read enter");
 	unsigned int num_cpus = ml_get_topology_info()->max_cpu_id + 1;
+	k70u_startup_event("topology", num_cpus, 0, 0, 0);
 	machine_info.max_cpus = num_cpus;
 	machine_info.physical_cpu_max = num_cpus;
 	machine_info.logical_cpu_max = num_cpus;

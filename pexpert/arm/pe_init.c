@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 /*
  * Copyright (c) 2000-2017 Apple Inc. All rights reserved.
  *
@@ -253,6 +254,7 @@ PE_initialize_console(PE_Video * info, int op)
 void
 PE_init_iokit(void)
 {
+	k70u_trace("PE_init_iokit", "entered");
 	DTEntry         entry;
 	unsigned int    size, scale;
 	unsigned long   display_size;
@@ -380,8 +382,12 @@ PE_init_iokit(void)
 #endif
 	}
 
+	k70u_trace("InitIOKit", "call");
 	InitIOKit(PE_state.deviceTreeHead);
+	k70u_trace("InitIOKit", "returned");
+	k70u_trace("ConfigureIOKit", "call");
 	ConfigureIOKit();
+	k70u_trace("ConfigureIOKit", "returned");
 }
 
 void
@@ -399,8 +405,12 @@ PE_lockdown_iokit(void)
 	 * against a kernel which has not yet enabled the full set of available
 	 * hardware protections.
 	 */
+	k70u_trace("zalloc_iokit_lockdown", "enter");
 	zalloc_iokit_lockdown();
+	k70u_trace("zalloc_iokit_lockdown", "returned");
+	k70u_trace("StartIOKitMatching", "call");
 	StartIOKitMatching();
+	k70u_trace("StartIOKitMatching", "returned");
 }
 
 void

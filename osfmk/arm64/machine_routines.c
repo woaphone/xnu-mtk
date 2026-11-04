@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 /*
  * Copyright (c) 2007-2017 Apple Inc. All rights reserved.
  *
@@ -524,6 +525,7 @@ user_timebase_type(void)
 void
 machine_startup(__unused boot_args * args)
 {
+	k70u_trace("machine_startup", "entered");
 #if defined(HAS_IPI) && (DEVELOPMENT || DEBUG)
 	if (!PE_parse_boot_argn("fastipi", &gFastIPI, sizeof(gFastIPI))) {
 		gFastIPI = 1;
@@ -531,12 +533,15 @@ machine_startup(__unused boot_args * args)
 #endif /* defined(HAS_IPI) && (DEVELOPMENT || DEBUG)*/
 
 
+	k70u_trace("machine_conf", "enter");
 	machine_conf();
+	k70u_trace("machine_conf", "returned");
 
 
 	/*
 	 * Kick off the kernel bootstrap.
 	 */
+	k70u_trace("kernel_bootstrap", "call");
 	kernel_bootstrap();
 	/* NOTREACHED */
 }

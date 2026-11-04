@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 #include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
@@ -410,7 +411,9 @@ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
 		}
 		startup_phase = cur->subsystem - 1;
 		kernel_startup_log(cur->subsystem);
+		k70u_startup_event("enter", cur->subsystem, cur->rank, (uintptr_t)cur->func, (uintptr_t)cur->arg);
 		cur->func(cur->arg);
+		k70u_startup_event("returned", cur->subsystem, cur->rank, (uintptr_t)cur->func, (uintptr_t)cur->arg);
 		startup_entry_cur = ++cur;
 	}
 	kernel_startup_log(upto);
@@ -425,18 +428,27 @@ kernel_startup_initialize_upto(startup_subsystem_id_t upto)
 void
 kernel_bootstrap(void)
 {
+	k70u_trace("kernel_bootstrap", "entered");
 	kern_return_t   result;
 	thread_t        thread;
 	char            namep[16];
 
 	code_signing_config_t cs_config;
 
-	printf("%s\n", version); /* log kernel version */
+	k70u_trace("bootstrap-call", "printf enter");
+	printf("%s\n", version);
+	k70u_trace("bootstrap-call", "printf returned"); /* log kernel version */
 
+	k70u_trace("scale_setup", "enter");
+	k70u_trace("bootstrap-call", "scale_setup enter");
 	scale_setup();
+	k70u_trace("bootstrap-call", "scale_setup returned");
+	k70u_trace("scale_setup", "returned");
 
 	kernel_bootstrap_log("vm_mem_bootstrap");
+	k70u_trace("bootstrap-call", "vm_mem_bootstrap enter");
 	vm_mem_bootstrap();
+	k70u_trace("bootstrap-call", "vm_mem_bootstrap returned");
 
 	machine_info.memory_size = (uint32_t)mem_size;
 #if XNU_TARGET_OS_OSX
@@ -482,13 +494,19 @@ kernel_bootstrap(void)
 	}
 
 	kernel_bootstrap_log("console_init");
+	k70u_trace("bootstrap-call", "console_init enter");
 	console_init();
+	k70u_trace("bootstrap-call", "console_init returned");
 
 	kernel_bootstrap_log("stackshot_init");
+	k70u_trace("bootstrap-call", "stackshot_init enter");
 	stackshot_init();
+	k70u_trace("bootstrap-call", "stackshot_init returned");
 
 	kernel_bootstrap_log("sched_init");
+	k70u_trace("bootstrap-call", "sched_init enter");
 	sched_init();
+	k70u_trace("bootstrap-call", "sched_init returned");
 
 #if CONFIG_MACF
 	kernel_bootstrap_log("mac_policy_init");
@@ -502,19 +520,29 @@ kernel_bootstrap(void)
 	 * that this CPU is using the kernel pmap.
 	 */
 	kernel_bootstrap_log("PMAP_ACTIVATE_KERNEL");
+	k70u_trace("bootstrap-call", "PMAP_ACTIVATE_KERNEL enter");
 	PMAP_ACTIVATE_KERNEL(master_cpu);
+	k70u_trace("bootstrap-call", "PMAP_ACTIVATE_KERNEL returned");
 
 	kernel_bootstrap_log("mapping_free_prime");
-	mapping_free_prime();                                           /* Load up with temporary mapping blocks */
+	k70u_trace("bootstrap-call", "mapping_free_prime enter");
+	mapping_free_prime();
+	k70u_trace("bootstrap-call", "mapping_free_prime returned");                                           /* Load up with temporary mapping blocks */
 
 	kernel_bootstrap_log("machine_init");
+	k70u_trace("bootstrap-call", "machine_init enter");
 	machine_init();
+	k70u_trace("bootstrap-call", "machine_init returned");
 
 	kernel_bootstrap_log("thread_machine_init_template");
+	k70u_trace("bootstrap-call", "thread_machine_init_template enter");
 	thread_machine_init_template();
+	k70u_trace("bootstrap-call", "thread_machine_init_template returned");
 
 	kernel_bootstrap_log("clock_init");
+	k70u_trace("bootstrap-call", "clock_init enter");
 	clock_init();
+	k70u_trace("bootstrap-call", "clock_init returned");
 
 	/*
 	 *	Initialize the IPC, task, and thread subsystems.
@@ -539,29 +567,45 @@ kernel_bootstrap(void)
 #endif /* XNU_TARGET_OS_OSX && (DEVELOPMENT || DEBUG) */
 
 	kernel_bootstrap_log("task_init");
+	k70u_trace("bootstrap-call", "task_init enter");
 	task_init();
+	k70u_trace("bootstrap-call", "task_init returned");
 
 	kernel_bootstrap_log("thread_init");
+	k70u_trace("bootstrap-call", "thread_init enter");
 	thread_init();
+	k70u_trace("bootstrap-call", "thread_init returned");
 
 	kernel_bootstrap_log("restartable_init");
+	k70u_trace("bootstrap-call", "restartable_init enter");
 	restartable_init();
+	k70u_trace("bootstrap-call", "restartable_init returned");
 
 	kernel_bootstrap_log("workq_init");
+	k70u_trace("bootstrap-call", "workq_init enter");
 	workq_init();
+	k70u_trace("bootstrap-call", "workq_init returned");
 
 	kernel_bootstrap_log("turnstiles_init");
+	k70u_trace("bootstrap-call", "turnstiles_init enter");
 	turnstiles_init();
+	k70u_trace("bootstrap-call", "turnstiles_init returned");
 
 	kernel_bootstrap_log("mach_init_activity_id");
+	k70u_trace("bootstrap-call", "mach_init_activity_id enter");
 	mach_init_activity_id();
+	k70u_trace("bootstrap-call", "mach_init_activity_id returned");
 
 	/* initialize host_statistics */
+	k70u_trace("bootstrap-call", "host_statistics_init enter");
 	host_statistics_init();
+	k70u_trace("bootstrap-call", "host_statistics_init returned");
 
 	/* initialize exceptions */
 	kernel_bootstrap_log("exception_init");
+	k70u_trace("bootstrap-call", "exception_init enter");
 	exception_init();
+	k70u_trace("bootstrap-call", "exception_init returned");
 
 #if CONFIG_SCHED_SFI
 	kernel_bootstrap_log("sfi_init");
@@ -584,10 +628,14 @@ kernel_bootstrap(void)
 	thread->last_made_runnable_time = mach_absolute_time();
 	thread_set_thread_name(thread, "kernel_bootstrap_thread");
 
+	k70u_trace("bootstrap-call", "thread_deallocate enter");
 	thread_deallocate(thread);
+	k70u_trace("bootstrap-call", "thread_deallocate returned");
 
 	kernel_bootstrap_log("load_context - done");
+	k70u_trace("bootstrap-call", "load_context enter");
 	load_context(thread);
+	k70u_trace("bootstrap-call", "load_context returned");
 	/*NOTREACHED*/
 }
 
@@ -604,6 +652,7 @@ SECURITY_READ_ONLY_LATE(uint64_t) vm_kernel_addrhash_salt_ext;
 static void
 kernel_bootstrap_thread(void)
 {
+	k70u_trace("kernel_bootstrap_thread", "entered");
 	processor_t processor = current_processor();
 
 #if (DEVELOPMENT || DEBUG)
@@ -659,9 +708,13 @@ kernel_bootstrap_thread(void)
 	/*
 	 *	Create the device service.
 	 */
+	k70u_trace("bootstrap-thread-call", "device_service_create enter");
 	device_service_create();
+	k70u_trace("bootstrap-thread-call", "device_service_create returned");
 
+	k70u_trace("bootstrap-thread-call", "phys_carveout_init enter");
 	phys_carveout_init();
+	k70u_trace("bootstrap-thread-call", "phys_carveout_init returned");
 
 #if MACH_KDP
 	kernel_bootstrap_log("kdp_init");
@@ -699,7 +752,9 @@ kernel_bootstrap_thread(void)
 
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_init_iokit");
+	k70u_trace("bootstrap-thread-call", "PE_init_iokit enter");
 	PE_init_iokit();
+	k70u_trace("bootstrap-thread-call", "PE_init_iokit returned");
 #endif
 
 	assert(ml_get_interrupts_enabled() == FALSE);
@@ -714,18 +769,26 @@ kernel_bootstrap_thread(void)
 	// Reset interrupts masked timeout before we enable interrupts
 	ml_spin_debug_clear_self();
 #endif
-	(void) spllo();         /* Allow interruptions */
+	k70u_trace("bootstrap-thread-call", "spllo enter");
+	(void) spllo();
+	k70u_trace("bootstrap-thread-call", "spllo returned");         /* Allow interruptions */
 
 	/*
 	 * This will start displaying progress to the user, start as early as possible
 	 */
+	k70u_trace("bootstrap-thread-call", "initialize_screen enter");
 	initialize_screen(NULL, kPEAcquireScreen);
+	k70u_trace("bootstrap-thread-call", "initialize_screen returned");
 
 	/*
 	 *	Initialize the shared region module.
 	 */
+	k70u_trace("bootstrap-thread-call", "vm_commpage_init enter");
 	vm_commpage_init();
+	k70u_trace("bootstrap-thread-call", "vm_commpage_init returned");
+	k70u_trace("bootstrap-thread-call", "vm_commpage_text_init enter");
 	vm_commpage_text_init();
+	k70u_trace("bootstrap-thread-call", "vm_commpage_text_init returned");
 
 #if CONFIG_MACF
 	kernel_bootstrap_log("mac_policy_initmach");
@@ -776,7 +839,9 @@ kernel_bootstrap_thread(void)
 	 * the static KVA mappings used for the jettisoned bootstrap segments.
 	 */
 	kernel_bootstrap_log("OSKextRemoveKextBootstrap");
+	k70u_trace("bootstrap-thread-call", "OSKextRemoveKextBootstrap enter");
 	OSKextRemoveKextBootstrap();
+	k70u_trace("bootstrap-thread-call", "OSKextRemoveKextBootstrap returned");
 
 #if SOCKETS
 	/*
@@ -787,7 +852,9 @@ kernel_bootstrap_thread(void)
 
 	/* No changes to kernel text and rodata beyond this point. */
 	kernel_bootstrap_log("machine_lockdown");
+	k70u_trace("bootstrap-thread-call", "machine_lockdown enter");
 	machine_lockdown();
+	k70u_trace("bootstrap-thread-call", "machine_lockdown returned");
 
 #ifdef CONFIG_XNUPOST
 	kern_return_t result = kernel_list_tests();
@@ -800,7 +867,9 @@ kernel_bootstrap_thread(void)
 
 #ifdef  IOKIT
 	kernel_bootstrap_log("PE_lockdown_iokit");
+	k70u_trace("bootstrap-thread-call", "PE_lockdown_iokit enter");
 	PE_lockdown_iokit();
+	k70u_trace("bootstrap-thread-call", "PE_lockdown_iokit returned");
 #endif
 	/*
 	 * max_cpus must be nailed down by the time PE_lockdown_iokit() finishes,
@@ -817,7 +886,9 @@ kernel_bootstrap_thread(void)
 	 *	Start the user bootstrap.
 	 */
 #ifdef  MACH_BSD
+	k70u_trace("bsd_init", "call");
 	bsd_init();
+	k70u_trace("bsd_init", "returned");
 #endif
 
 
@@ -842,7 +913,9 @@ kernel_bootstrap_thread(void)
 	/*
 	 *	Become the pageout daemon.
 	 */
+	k70u_trace("bootstrap-thread-call", "vm_pageout enter");
 	vm_pageout();
+	k70u_trace("bootstrap-thread-call", "vm_pageout returned");
 	/*NOTREACHED*/
 }
 

@@ -162,10 +162,58 @@ k70u_beacon(const char *msg)
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
+static volatile unsigned k70u_writer_busy;
+volatile unsigned k70u_trace_dropped;
+
 void
 k70u_pmsg(const char *msg)
 {
+	uint64_t saved_daif;
+	if (!k70u_beacon_ready) return;
+	__asm__ volatile("mrs %0, daif\nmsr daifset, #3" : "=r"(saved_daif) :: "memory");
+	if (__sync_lock_test_and_set(&k70u_writer_busy, 1)) {
+		__sync_fetch_and_add(&k70u_trace_dropped, 1);
+		__asm__ volatile("msr daif, %0" :: "r"(saved_daif) : "memory");
+		return;
+	}
 	k70u_beacon(msg);
+	__sync_lock_release(&k70u_writer_busy);
+	__asm__ volatile("msr daif, %0" :: "r"(saved_daif) : "memory");
+}
+
+static unsigned
+k70u_copy(char *out, unsigned at, const char *s)
+{
+	if (s) while (*s && at < 350) out[at++] = *s++;
+	return at;
+}
+
+void
+k70u_trace(const char *scope, const char *stage)
+{
+	char out[384];
+	unsigned n = k70u_copy(out, 0, "K70U-TRACE3: ");
+	n = k70u_copy(out, n, scope);
+	n = k70u_copy(out, n, " | ");
+	n = k70u_copy(out, n, stage);
+	out[n++] = '\n'; out[n] = 0; k70u_pmsg(out);
+}
+
+void
+k70u_startup_event(const char *event, uint64_t subsystem, uint64_t rank,
+    uint64_t function, uint64_t argument)
+{
+	char out[384];
+	unsigned n = k70u_copy(out, 0, "K70U-CALLBACK3: ");
+	const uint64_t values[4] = {subsystem, rank, function, argument};
+	const char *labels[4] = {" sub=", " rank=", " fn=", " arg="};
+	if (event) while (*event && n < 96) out[n++] = *event++;
+	for (unsigned i = 0; i < 4; i++) {
+		n = k70u_copy(out, n, labels[i]);
+		for (int shift = 60; shift >= 0; shift -= 4)
+			out[n++] = "0123456789abcdef"[(values[i] >> shift) & 15];
+	}
+	out[n++] = '\n'; out[n] = 0; k70u_pmsg(out);
 }
 
 /* Enabled only once arm_vm_init() has run - before that ml_io_map() is unsafe. */

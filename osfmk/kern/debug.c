@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 /*
  * Copyright (c) 2000-2020 Apple Inc. All rights reserved.
  *
@@ -1020,6 +1021,7 @@ register_additional_panic_data_buffer(const char *producer_name, void *buf, int 
 void
 panic(const char *str, ...)
 {
+	k70u_trace("PANIC format", str);
 	va_list panic_str_args;
 
 	/* yunluo: an OOM panic dies inside the paniclog builder before the later
@@ -1063,6 +1065,7 @@ panic_with_data(uuid_t uuid, void *addr, uint32_t len, const char *str, ...)
 void
 panic_with_options(unsigned int reason, void *ctx, uint64_t debugger_options_mask, const char *str, ...)
 {
+	k70u_trace("PANIC_OPTIONS format", str);
 	va_list panic_str_args;
 
 	va_start(panic_str_args, str);

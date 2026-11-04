@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 // SPDX-License-Identifier: MIT
 #ifndef XNU_BOOT_PROGRESS_H
 #define XNU_BOOT_PROGRESS_H
@@ -22,7 +23,7 @@ void boot_progress_exit(int, const char *, int, unsigned, uint64_t);
 #define boot_progress_active() 0
 #define boot_progress_bind(...) ((void)0)
 static inline void boot_progress_putc(char c) { (void)c; }
-#define boot_progress_stage(s) ((void)0)
+#define boot_progress_stage(s) k70u_trace("stage", (s))
 #define boot_progress_irq(...) ((void)0)
 #define boot_progress_poll() ((void)0)
 #define boot_progress_user_breakpoint(...) ((void)0)
