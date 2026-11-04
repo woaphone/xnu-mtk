@@ -143,14 +143,8 @@ k70u_beacon(const char *msg)
 	}
 
 	count = len;
-	if ((uintptr_t)hdr[2] < capacity) {
-		uintptr_t grown = (uintptr_t)hdr[2] + count;
-		hdr[2] = (uint32_t)((grown > capacity) ? capacity : grown);
-	}
-
+	uintptr_t grown = (uintptr_t)hdr[2] + count;
 	start = (uintptr_t)hdr[1];
-	hdr[1] = (uint32_t)((start + count) % capacity);
-
 	first = capacity - start;
 	if (first > count) {
 		first = count;
@@ -162,6 +156,9 @@ k70u_beacon(const char *msg)
 		data[i - first] = (uint8_t)msg[i];
 	}
 
+	__asm__ volatile("dsb sy" ::: "memory");
+	hdr[1] = (uint32_t)((start + count) % capacity);
+	hdr[2] = (uint32_t)((grown > capacity) ? capacity : grown);
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
