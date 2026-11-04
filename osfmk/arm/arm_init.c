@@ -165,6 +165,12 @@ k70u_beacon(const char *msg)
 	__asm__ volatile("dsb sy" ::: "memory");
 }
 
+void
+k70u_pmsg(const char *msg)
+{
+	k70u_beacon(msg);
+}
+
 /* Enabled only once arm_vm_init() has run - before that ml_io_map() is unsafe. */
 static void
 k70u_beacon_on(void)
@@ -692,10 +698,13 @@ arm_init(
 		(void)switch_to_serial_console(); /* Switch into serial mode from video console */
 		disableConsoleOutput = FALSE;     /* Allow printfs to happen */
 	}
+	k70u_beacon("K70U-KERNEL: PE_create_console enter\n");
 	PE_create_console();
+	k70u_beacon("K70U-KERNEL: PE_create_console returned\n");
 
 	/* setup console output */
 	PE_init_printf(FALSE);
+	k70u_beacon("K70U-KERNEL: PE_init_printf returned\n");
 
 #if __arm64__
 #if DEBUG
@@ -771,6 +780,7 @@ arm_init(
 	 * against string vulnerabilities
 	 */
 	__stack_chk_guard &= ~(0xFFULL << 8);
+	k70u_beacon("K70U-KERNEL: machine_startup enter\n");
 	machine_startup(args);
 }
 
