@@ -99,6 +99,8 @@
 
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
+#include <vm/vm_page.h>
+#include <vm/vm_pageout.h>
 #include <machine/machine_cpu.h>
 
 #include <pexpert/pexpert.h>
@@ -1280,6 +1282,75 @@ static uint32_t k70u_display_ms = 1000;
 static uint64_t k70u_display_pushes;
 static uint64_t k70u_display_hb_last;
 volatile uint32_t k70u_display_busy;
+
+/* [rothko unx3] Kernel owns the inherited MT6989 watchdog after DarwinJump.
+ * This callout is independent of DSI; retain MODE/LENGTH and only ping an
+ * already enabled watchdog. A stalled scheduler stops feeding naturally. */
+#define K70U_WDT3_PHYS 0x1C00B000ULL
+static volatile uint32_t *k70u_wdt3;
+static thread_call_data_t k70u_health_call;
+static uint64_t k70u_wdt3_pings;
+static uint64_t k70u_health_last;
+static int k70u_health_started;
+
+void
+k70u_memory_snapshot(const char *stage)
+{
+	char line[384];
+	snprintf(line, sizeof(line),
+	    "K70U-MEM3: %s max=%llu sane=%llu page=%u free=%u min=%u target=%u wire=%u active=%u inactive=%u spec=%u compressor-pressure=%u phys-base=0x%llx phys-size=0x%llx\n",
+	    stage, (unsigned long long)max_mem, (unsigned long long)sane_size,
+	    (unsigned int)PAGE_SIZE, vm_page_free_count, vm_page_free_min,
+	    vm_page_free_target, vm_page_wire_count, vm_page_active_count,
+	    vm_page_inactive_count, vm_page_speculative_count,
+	    vm_pageout_state.vm_memory_pressure,
+	    (unsigned long long)gPhysBase, (unsigned long long)gPhysSize);
+	k70u_pmsg(line);
+}
+
+static void
+k70u_health_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
+{
+	if (k70u_wdt3 && (k70u_wdt3[0] & 1U)) {
+		k70u_wdt3[2] = 0x1971U;
+		__asm__ volatile ("dsb sy" ::: "memory");
+		k70u_wdt3_pings++;
+	}
+	uint64_t now = mach_absolute_time(), ns = 0, interval = 0;
+	nanoseconds_to_absolutetime(5ULL * NSEC_PER_SEC, &interval);
+	if (now - k70u_health_last >= interval) {
+		char line[192];
+		k70u_health_last = now;
+		absolutetime_to_nanoseconds(now, &ns);
+		snprintf(line, sizeof(line), "K70U-WDT3: t=%llus pings=%llu mode=0x%x length=0x%x status=0x%x irq=%llu\n",
+		    (unsigned long long)(ns / NSEC_PER_SEC), (unsigned long long)k70u_wdt3_pings,
+		    k70u_wdt3 ? k70u_wdt3[0] : 0, k70u_wdt3 ? k70u_wdt3[1] : 0,
+		    k70u_wdt3 ? k70u_wdt3[3] : 0, (unsigned long long)k70u_irq_count);
+		k70u_pmsg(line);
+		k70u_memory_snapshot("tick");
+	}
+	uint64_t deadline = 0;
+	clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);
+	thread_call_enter_delayed(&k70u_health_call, deadline);
+}
+
+void
+k70u_health_start(void)
+{
+	if (k70u_health_started) { return; }
+	k70u_health_started = 1;
+	k70u_wdt3 = (volatile uint32_t *)ml_io_map(K70U_WDT3_PHYS, PAGE_SIZE);
+	char line[192];
+	snprintf(line, sizeof(line), "K70U-WDT3: takeover base=0x%llx mapped=%u mode=0x%x length=0x%x status=0x%x\n",
+	    (unsigned long long)K70U_WDT3_PHYS, k70u_wdt3 != NULL,
+	    k70u_wdt3 ? k70u_wdt3[0] : 0, k70u_wdt3 ? k70u_wdt3[1] : 0,
+	    k70u_wdt3 ? k70u_wdt3[3] : 0);
+	k70u_pmsg(line);
+	k70u_memory_snapshot("health-start");
+	thread_call_setup(&k70u_health_call, k70u_health_tick, NULL);
+	k70u_health_last = mach_absolute_time();
+	k70u_health_tick(NULL, NULL);
+}
 
 static void
 k70u_display_push(void)

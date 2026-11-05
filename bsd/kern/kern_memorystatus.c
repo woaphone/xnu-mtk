@@ -27,6 +27,7 @@
  *
  */
 
+#include <kern/k70u_trace.h>
 #include <kern/sched_prim.h>
 #include <kern/kalloc.h>
 #include <kern/assert.h>
@@ -1651,6 +1652,9 @@ memorystatus_do_kill(proc_t p, uint32_t cause, os_reason_t jetsam_reason, uint64
 	int error = 0;
 	__unused pid_t victim_pid = proc_getpid(p);
 	uint64_t footprint = get_task_phys_footprint(proc_task(p));
+	printf("K70U-JETSAM3: pid=%d name=%s cause=%u footprint=%llu free=%u\n",
+	    victim_pid, p->p_name, cause, (unsigned long long)footprint, vm_page_free_count);
+	k70u_memory_snapshot("jetsam");
 #if (KDEBUG_LEVEL >= KDEBUG_LEVEL_STANDARD)
 	int32_t memstat_effectivepriority = p->p_memstat_effectivepriority;
 #endif /* (KDEBUG_LEVEL >= KDEBUG_LEVEL_STANDARD) */

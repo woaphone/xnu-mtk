@@ -1,3 +1,4 @@
+#include <kern/k70u_trace.h>
 #include <kern/boot_progress.h>
 /*
  * Copyright (c) 2000-2016 Apple Inc. All rights reserved.
@@ -1342,7 +1343,12 @@ sysctl_initproc_spawned(struct sysctl_oid *oidp, __unused void *arg1, __unused i
 		// Can only ever be set by launchd, and only once at boot
 		return EPERM;
 	}
-	return sysctl_handle_int(oidp, &initproc_spawned, 0, req);
+	int error = sysctl_handle_int(oidp, &initproc_spawned, 0, req);
+	if (req->newptr != 0 && error == 0) {
+		printf("K70U-INIT3: launchd-main=%d\n", initproc_spawned);
+		k70u_memory_snapshot("launchd-main");
+	}
+	return error;
 }
 
 SYSCTL_PROC(_kern, OID_AUTO, initproc_spawned,

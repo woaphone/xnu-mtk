@@ -37,6 +37,7 @@
  * is included in support of clause 2.2 (b) of the Apple Public License,
  * Version 2.0.
  */
+#include <kern/k70u_trace.h>
 #include <vm/vm_options.h>
 
 #include <kern/ecc.h>
@@ -2137,6 +2138,8 @@ shared_region_check_np(
 				    (void *)VM_KERNEL_ADDRPERM(current_thread()),
 				    proc_getpid(p), p->p_comm,
 				    (uint64_t)uap->start_address));
+				printf("K70U-SR3: check pid=%d kr=%d empty-region\n", proc_getpid(p), kr);
+				k70u_memory_snapshot("shared-region-empty");
 				error = ENOMEM;
 			} else {
 #if __has_feature(ptrauth_calls)
@@ -3116,6 +3119,9 @@ shared_region_map_and_slide_2_np(
 
 	kr = _shared_region_map_and_slide(p, files_count, shared_files, mappings_count, mappings);
 done:
+	/* [k70u unx3] did dyld map the shared cache? */
+	printf("K70U-SR3: map pid=%d files=%u mappings=%u kr=%d\n",
+	    proc_getpid(p), files_count, mappings_count, kr);
 	kfree_data(shared_files, files_count * sizeof(shared_files[0]));
 	kfree_data(mappings, mappings_count * sizeof(mappings[0]));
 	return kr;

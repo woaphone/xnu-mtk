@@ -781,6 +781,7 @@ kernel_bootstrap_thread(void)
 	initialize_screen(NULL, kPEAcquireScreen);
 	k70u_trace("bootstrap-thread-call", "initialize_screen returned");
 	/* [k70u unx1] command-mode DSI: start pushing console frames to the panel */
+	k70u_health_start();
 	k70u_display_start();
 
 	/*

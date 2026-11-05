@@ -784,6 +784,13 @@ arm_init(
 	// every stage from here on is recorded where Android can read it back.
 	k70u_beacon_on();
 	k70u_beacon("K70U-KERNEL: arm_vm_init ok\n");
+	{
+		char line[256];
+		snprintf(line, sizeof(line), "K70U-MEM3: boot phys=0x%llx bytes=%llu actual=%llu kernel-top=0x%llx\n",
+		    (unsigned long long)args->physBase, (unsigned long long)args->memSize,
+		    (unsigned long long)args->memSizeActual, (unsigned long long)args->topOfKernelData);
+		k70u_beacon(line);
+	}
 
 	if (debug_boot_arg) {
 		patch_low_glo();
