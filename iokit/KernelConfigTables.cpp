@@ -63,6 +63,7 @@ const char * gIOKernelConfigTables =
 #if defined(XNU_NATIVE_AES) && XNU_NATIVE_AES
     "   ,{"
     "     'IOClass'         = NativeAES;"
+    "     'IOMatchCategory' = NativeAES;"
     "     'IOProviderClass' = IOResources;"
     "     'IOResourceMatch' = IOBSD;"
     "     'IOProbeScore'    = 1000:32;"
@@ -107,6 +108,7 @@ const char * gIOKernelConfigTables =
 #if defined(XNU_NATIVE_MTKUFS) && XNU_NATIVE_MTKUFS
     "   ,{"
     "     'IOClass'         = NativeMtkUfs;"
+    "     'IOMatchCategory' = NativeMtkUfs;"
     "     'IOProviderClass' = IOResources;"
     "     'IOResourceMatch' = IOBSD;"
     "     'IOProbeScore'    = 1000:32;"
