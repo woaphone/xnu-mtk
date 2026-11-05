@@ -5755,6 +5755,10 @@ __attribute__((used)) const uint32_t cs_native4k_hash_cache_version = 1;
 unsigned long cs_native4k_full_blocks = 0;
 unsigned long cs_native4k_page_checks = 0;
 unsigned long cs_native4k_ready_blobs = 0;
+/* The boot cost, for a board's diagnostics: mach_absolute_time ticks in vn_rdwr (the storage driver's work included) and in the
+ * hashing, and the bytes read. */
+uint64_t cs_native4k_read_ticks = 0, cs_native4k_hash_ticks = 0, cs_native4k_bytes = 0;
+extern uint64_t mach_absolute_time(void);
 
 /* The original signed 16K hash authenticates the whole immutable input
  * buffer first. Only then derive native-page digests from that same buffer.
@@ -5762,6 +5766,11 @@ unsigned long cs_native4k_ready_blobs = 0;
  * derived array readonly before its owning RO cs_blob can become visible.
  * VM fault validation consequently performs no vnode I/O under object locks.
  */
+/* One read covers 64 original blocks. Files above 32 MiB (the 3 GB dyld shared cache, read whole by launchd at every boot) are read
+ * uncached: through the page cache they left almost no free memory when the first daemons started. */
+#define CS_NATIVE4K_CHUNK       (1024 * 1024)
+#define CS_NATIVE4K_UNCACHED    (32 * 1024 * 1024)
+
 __attribute__((noinline))
 static int
 cs_native4k_prepare(vnode_t vp, struct cs_blob *blob)
@@ -5771,8 +5780,8 @@ cs_native4k_prepare(vnode_t vp, struct cs_blob *blob)
 	vm_offset_t storage = 0;
 	vm_size_t allocation = 0, count = 0;
 	uint8_t *buffer = NULL;
-	uint64_t limit, offset;
-	int error = EBADEXEC;
+	uint64_t limit, offset, chunk;
+	int error = EBADEXEC, ioflags;
 	kern_return_t kr;
 
 	if (blob->csb_hash_pageshift <= PAGE_SHIFT) {
@@ -5801,49 +5810,65 @@ cs_native4k_prepare(vnode_t vp, struct cs_blob *blob)
 	if (kr != KERN_SUCCESS) {
 		return ENOMEM;
 	}
-	buffer = kalloc_data(16384, Z_WAITOK);
-	for (offset = 0; offset < limit; offset += 16384) {
-		union cs_hash_union ctx;
-		uint8_t digest[CS_HASH_MAX_SIZE];
-		const uint8_t *expected;
-		const char *lower = blob->csb_mem_kaddr;
-		const char *upper = lower + blob->csb_mem_size;
-		size_t length = MIN((uint64_t)16384, limit - offset);
+	buffer = kalloc_data(CS_NATIVE4K_CHUNK, Z_WAITOK);
+	if (buffer == NULL) {
+		error = ENOMEM;
+		goto out;
+	}
+	/* Executables are faulted in right after their signature is added and stay cached. */
+	ioflags = limit > CS_NATIVE4K_UNCACHED ? IO_NOCACHE : 0;
+	for (chunk = 0; chunk < limit; chunk += CS_NATIVE4K_CHUNK) {
+		size_t chunk_length = MIN((uint64_t)CS_NATIVE4K_CHUNK, limit - chunk);
 		int resid = 0;
 		off_t position;
-		if (os_add_overflow(blob->csb_base_offset, (off_t)offset, &position)) {
+		if (os_add_overflow(blob->csb_base_offset, (off_t)chunk, &position)) {
 			error = EOVERFLOW;
 			goto out;
 		}
-		error = vn_rdwr(UIO_READ, vp, (caddr_t)buffer, (int)length, position,
-		    UIO_SYSSPACE, 0, vfs_context_ucred(vfs_context_current()),
+		const uint64_t read_start = mach_absolute_time();
+		error = vn_rdwr(UIO_READ, vp, (caddr_t)buffer, (int)chunk_length, position,
+		    UIO_SYSSPACE, ioflags, vfs_context_ucred(vfs_context_current()),
 		    &resid, current_proc());
+		const uint64_t hash_start = mach_absolute_time();
+		os_atomic_add(&cs_native4k_read_ticks, hash_start - read_start, relaxed);
+		os_atomic_add(&cs_native4k_bytes, (uint64_t)chunk_length, relaxed);
 		if (error || resid) {
 			error = error ? error : EIO;
 			goto out;
 		}
-		expected = hashes(cd, (uint32_t)(offset >> 14), md->cs_size, lower, upper);
-		if (expected == NULL) {
-			error = EBADEXEC;
-			goto out;
-		}
-		md->cs_init(&ctx);
-		md->cs_update(&ctx, buffer, length);
-		md->cs_final(digest, &ctx);
-		if (bcmp(expected, digest, md->cs_size)) {
-			os_atomic_inc(&cs_validate_page_bad_hash, relaxed);
-			error = EBADEXEC;
-			goto out;
-		}
-		os_atomic_inc(&cs_native4k_full_blocks, relaxed);
-		for (size_t sub = 0; sub < length; sub += PAGE_SIZE) {
-			size_t bytes = MIN((size_t)PAGE_SIZE, length - sub);
-			vm_size_t index = (offset + sub) >> PAGE_SHIFT;
+		for (size_t block = 0; block < chunk_length; block += 16384) {
+			union cs_hash_union ctx;
+			uint8_t digest[CS_HASH_MAX_SIZE];
+			const uint8_t *expected;
+			const uint8_t *data = buffer + block;
+			const char *lower = blob->csb_mem_kaddr;
+			const char *upper = lower + blob->csb_mem_size;
+			size_t length = MIN((size_t)16384, chunk_length - block);
+			offset = chunk + block;
+			expected = hashes(cd, (uint32_t)(offset >> 14), md->cs_size, lower, upper);
+			if (expected == NULL) {
+				error = EBADEXEC;
+				goto out;
+			}
 			md->cs_init(&ctx);
-			md->cs_update(&ctx, buffer + sub, bytes);
+			md->cs_update(&ctx, data, length);
 			md->cs_final(digest, &ctx);
-			memcpy((void *)(storage + index * md->cs_size), digest, md->cs_size);
+			if (bcmp(expected, digest, md->cs_size)) {
+				os_atomic_inc(&cs_validate_page_bad_hash, relaxed);
+				error = EBADEXEC;
+				goto out;
+			}
+			os_atomic_inc(&cs_native4k_full_blocks, relaxed);
+			for (size_t sub = 0; sub < length; sub += PAGE_SIZE) {
+				size_t bytes = MIN((size_t)PAGE_SIZE, length - sub);
+				vm_size_t index = (offset + sub) >> PAGE_SHIFT;
+				md->cs_init(&ctx);
+				md->cs_update(&ctx, data + sub, bytes);
+				md->cs_final(digest, &ctx);
+				memcpy((void *)(storage + index * md->cs_size), digest, md->cs_size);
+			}
 		}
+		os_atomic_add(&cs_native4k_hash_ticks, mach_absolute_time() - hash_start, relaxed);
 	}
 	kr = vm_map_protect(kernel_map, storage, storage + allocation, VM_PROT_READ, TRUE);
 	if (kr != KERN_SUCCESS) {
@@ -5857,7 +5882,7 @@ cs_native4k_prepare(vnode_t vp, struct cs_blob *blob)
 	os_atomic_inc(&cs_native4k_ready_blobs, relaxed);
 	error = 0;
 out:
-	kfree_data(buffer, 16384);
+	kfree_data(buffer, CS_NATIVE4K_CHUNK);
 	if (storage) {
 		kmem_free(kernel_map, storage, allocation);
 	}

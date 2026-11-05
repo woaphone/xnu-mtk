@@ -7061,7 +7061,10 @@ native_owner_cache_checkpoint(int status, int authorized)
 static int
 native_owner_cache_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp)
 {
-	const char *volume = "8846FE78-2910-4297-AF97-D59BB6F8FC16";
+	#ifndef XNU_OWNER_CACHE_VOLUME_UUID
+#define XNU_OWNER_CACHE_VOLUME_UUID "8846FE78-2910-4297-AF97-D59BB6F8FC16"
+#endif
+	const char *volume = XNU_OWNER_CACHE_VOLUME_UUID;
 #if defined(XNU_OWNER_UNION_SYSTEMOS) && XNU_OWNER_UNION_SYSTEMOS
 #if !CONFIG_UNION_MOUNTS
 #error The owner composition requires the original native union-mount implementation
@@ -7216,6 +7219,8 @@ volatile int native_gpu_addon_stage = 0;
 volatile int native_gpu_addon_status = -1;
 volatile int native_gpu_addon2_stage = 0;
 volatile int native_gpu_addon2_status = -1;
+volatile int native_gpu_addon3_stage = 0;
+volatile int native_gpu_addon3_status = -1;
 static void
 native_gpu_addon_mount(proc_t p, user_addr_t scratch, user_addr_t offset, const char *source, size_t source_size,
     const char *point, size_t point_size, const char *visible, const char *own, volatile int *stage, volatile int *status)
@@ -7263,13 +7268,391 @@ native_gpu_addon_mount(proc_t p, user_addr_t scratch, user_addr_t offset, const 
 	}
 	*status = error;
 }
-static void
-native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+/* The GPU addon of the boot payload (scripts/make-gpu-addon.py, handed over by the loader as /chosen/memory-map/GpuAddon): every file
+ * whose content or mode differs from the mounted Data volume is written there before the addon mounts, so the plugin no longer has to
+ * be part of the Data seed and the seed's persistent store survives a plugin rebuild. Missing directories below /private/var/ngpu are
+ * created. A malformed addon is refused as a whole; a file that cannot be written keeps its old content.
+ * Counters for the boot log: files in the addon (-1 none), files written, files already equal, failures and the last error. */
+extern int native_ram_block_gpu_addon(const uint8_t **, uint64_t *) __attribute__((weak_import));
+#include <libkern/zlib.h>
+/* zlib's state, from kalloc with its size in front (the default allocator of the kernel's zlib is not meant for this). */
+static voidpf
+native_gpu_addon_zalloc(voidpf opaque __unused, uInt items, uInt size)
 {
-	uint32_t enabled = 0;
-	if (!PE_parse_boot_argn("sheng-gpu-addon", &enabled, sizeof(enabled)) || enabled != 1) {
+	size_t bytes = (size_t)items * size + 16;
+	uint8_t *block = kalloc_data(bytes, Z_WAITOK | Z_ZERO);
+	if (!block) {
+		return Z_NULL;
+	}
+	memcpy(block, &bytes, sizeof(bytes));
+	return block + 16;
+}
+static void
+native_gpu_addon_zfree(voidpf opaque __unused, voidpf address)
+{
+	uint8_t *block = (uint8_t *)address - 16;
+	size_t bytes = 0;
+	memcpy(&bytes, block, sizeof(bytes));
+	kfree_data(block, bytes);
+}
+static int
+native_gpu_addon_inflate(const uint8_t *packed, uint64_t packed_size, uint8_t *data, uint64_t size)
+{
+	z_stream stream;
+	memset(&stream, 0, sizeof(stream));
+	stream.zalloc = native_gpu_addon_zalloc;
+	stream.zfree = native_gpu_addon_zfree;
+	stream.next_in = (Bytef *)(uintptr_t)packed;
+	stream.avail_in = (uInt)packed_size;
+	stream.next_out = data;
+	stream.avail_out = (uInt)size;
+	if (inflateInit(&stream) != Z_OK) {
+		return ENOMEM;
+	}
+	int result = inflate(&stream, Z_FINISH);
+	inflateEnd(&stream);
+	return result == Z_STREAM_END && stream.total_out == size && !stream.avail_in ? 0 : EINVAL;
+}
+volatile int native_gpu_addon_files = -1;
+volatile int native_gpu_addon_written = 0;
+volatile int native_gpu_addon_same = 0;
+volatile int native_gpu_addon_failed = 0;
+volatile int native_gpu_addon_error = 0;
+static int
+native_gpu_addon_equal(vnode_t vp, const uint8_t *data, uint64_t size, uint32_t mode, vfs_context_t ctx)
+{
+	struct vnode_attr va;
+	VATTR_INIT(&va);
+	VATTR_WANTED(&va, va_data_size);
+	VATTR_WANTED(&va, va_mode);
+	if (vnode_getattr(vp, &va, ctx) || va.va_data_size != size || (va.va_mode & 07777) != mode) {
+		return 0;
+	}
+	const uint32_t chunk = 1024 * 1024;
+	uint8_t *buffer = kalloc_data(chunk, Z_WAITOK);
+	if (!buffer) {
+		return 0;
+	}
+	int equal = 1;
+	for (uint64_t at = 0; equal && at < size; at += chunk) {
+		int length = (int)(size - at < chunk ? size - at : chunk), resid = 0;
+		if (vn_rdwr(UIO_READ, vp, (caddr_t)buffer, length, (off_t)at, UIO_SYSSPACE, IO_NOAUTH, vfs_context_ucred(ctx), &resid,
+		    vfs_context_proc(ctx)) || resid || memcmp(buffer, data + at, length)) {
+			equal = 0;
+		}
+	}
+	kfree_data(buffer, chunk);
+	return equal;
+}
+static int
+native_gpu_addon_write(const char *path, const uint8_t *data, uint64_t size, uint32_t mode, vfs_context_t ctx)
+{
+	vnode_t vp = NULLVP;
+	int error = vnode_open(path, FREAD | O_NOFOLLOW, 0, 0, &vp, ctx);
+	if (!error) {
+		int equal = native_gpu_addon_equal(vp, data, size, mode, ctx);
+		vnode_close(vp, FREAD, ctx);
+		vp = NULLVP;
+		if (equal) {
+			return -1;
+		}
+	}
+	error = vnode_open(path, O_CREAT | O_TRUNC | FWRITE | O_NOFOLLOW, mode, 0, &vp, ctx);
+	if (error) {
+		return error;
+	}
+	int resid = 0;
+	error = vn_rdwr(UIO_WRITE, vp, (caddr_t)(uintptr_t)data, (int)size, 0, UIO_SYSSPACE, IO_NOAUTH | IO_UNIT, vfs_context_ucred(ctx),
+	    &resid, vfs_context_proc(ctx));
+	if (!error && resid) {
+		error = EIO;
+	}
+	if (!error) {
+		struct vnode_attr va;
+		VATTR_INIT(&va);
+		VATTR_SET(&va, va_mode, mode);
+		error = vnode_setattr(vp, &va, ctx);
+	}
+	if (!error) {
+		error = VNOP_FSYNC(vp, MNT_WAIT, ctx);
+	}
+	int close_error = vnode_close(vp, FWRITE, ctx);
+	return error ? error : close_error;
+}
+/* Creates the missing parent directories of an addon path with the mkdir syscall, /private/var/ngpu itself included (a Data seed
+ * that never had add-gpu-plugin-data.py applied has none). The scratch is one 4 KiB page; the mount arguments end below 0xa00. */
+static int
+native_gpu_addon_parents(proc_t p, user_addr_t scratch, const char *path)
+{
+	char parent[192];
+	strlcpy(parent, path, sizeof(parent));
+	for (size_t i = sizeof("/private/var/ngpu") - 1; parent[i]; ++i) {
+		if (parent[i] != '/') {
+			continue;
+		}
+		parent[i] = 0;
+		struct mkdir_args request = {.path = scratch + 0xc00, .mode = 0755};
+		int32_t result = 0;
+		int error = copyout(parent, request.path, i + 1);
+		if (!error) {
+			error = mkdir(p, &request, &result);
+		}
+		parent[i] = '/';
+		if (error && error != EEXIST) {
+			return error;
+		}
+	}
+	return 0;
+}
+static void
+native_gpu_addon_install(proc_t p, user_addr_t scratch)
+{
+	const uint8_t *addon = NULL;
+	uint64_t bytes = 0;
+	if (!native_ram_block_gpu_addon || !native_ram_block_gpu_addon(&addon, &bytes)) {
 		return;
 	}
+	uint32_t count = 0;
+	uint64_t total = 0;
+	if (bytes < 24 || memcmp(addon, "NGPUADD2", 8)) {
+		native_gpu_addon_error = EINVAL;
+		return;
+	}
+	memcpy(&count, addon + 8, 4);
+	memcpy(&total, addon + 16, 8);
+	if (total != bytes || !count || count > 4096) {
+		native_gpu_addon_error = EINVAL;
+		return;
+	}
+	/* Validate the whole addon before writing anything. */
+	uint64_t at = 24;
+	for (uint32_t i = 0; i < count; ++i) {
+		uint32_t name_bytes = 0, mode = 0;
+		uint64_t size = 0, packed = 0;
+		if (bytes - at < 24) {
+			native_gpu_addon_error = EINVAL;
+			return;
+		}
+		memcpy(&name_bytes, addon + at, 4);
+		memcpy(&mode, addon + at + 4, 4);
+		memcpy(&size, addon + at + 8, 8);
+		memcpy(&packed, addon + at + 16, 8);
+		at += 24;
+		uint64_t name_padded = (name_bytes + 7) & ~7ULL, size_padded = (packed + 7) & ~7ULL;
+		const char *name = (const char *)(addon + at);
+		if (name_bytes < 2 || name_bytes > 160 || bytes - at < name_padded || name[name_bytes - 1] || strnlen(name, name_bytes) != name_bytes - 1 ||
+		    name[0] == '/' || (mode & ~0777) || size > INT32_MAX || !packed || packed > INT32_MAX || bytes - at - name_padded < size_padded) {
+			native_gpu_addon_error = EINVAL;
+			return;
+		}
+		for (uint32_t k = 0; k + 1 < name_bytes - 1; ++k) {
+			if (name[k] == '.' && name[k + 1] == '.') {
+				native_gpu_addon_error = EINVAL;
+				return;
+			}
+		}
+		at += name_padded + size_padded;
+	}
+	if (at != bytes) {
+		native_gpu_addon_error = EINVAL;
+		return;
+	}
+	native_gpu_addon_files = (int)count;
+	vfs_context_t ctx = vfs_context_current();
+	char path[192];
+	at = 24;
+	for (uint32_t i = 0; i < count; ++i) {
+		uint32_t name_bytes = 0, mode = 0;
+		uint64_t size = 0, packed = 0;
+		memcpy(&name_bytes, addon + at, 4);
+		memcpy(&mode, addon + at + 4, 4);
+		memcpy(&size, addon + at + 8, 8);
+		memcpy(&packed, addon + at + 16, 8);
+		at += 24;
+		const char *name = (const char *)(addon + at);
+		at += (name_bytes + 7) & ~7ULL;
+		snprintf(path, sizeof(path), "/private/var/ngpu/%s", name);
+		uint8_t *data = kalloc_data(size ? size : 1, Z_WAITOK);
+		int error = data ? native_gpu_addon_inflate(addon + at, packed, data, size) : ENOMEM;
+		if (!error) {
+			error = native_gpu_addon_write(path, data, size, mode, ctx);
+			if (error == ENOENT && !(error = native_gpu_addon_parents(p, scratch, path))) {
+				error = native_gpu_addon_write(path, data, size, mode, ctx);
+			}
+		}
+		if (data) {
+			kfree_data(data, size ? size : 1);
+		}
+		if (error < 0) {
+			native_gpu_addon_same++;
+		} else if (error) {
+			native_gpu_addon_failed++;
+			native_gpu_addon_error = error;
+		} else {
+			native_gpu_addon_written++;
+		}
+		at += (packed + 7) & ~7ULL;
+	}
+}
+/* The OS cryptex where iPadOS looks for it. The root volume's entries for cryptex content are links into /System/Cryptexes/OS, which
+ * leads to /private/preboot/Cryptexes/OS; WebKit's processes are ExtensionKit extensions reached that way
+ * (/System/Library/ExtensionKit/Extensions/WebContentExtension.appex and its Networking and GPU siblings), so with the path missing
+ * Safari could not start them and its pages never loaded. The SystemOS volume is already the upper layer of the root union: its
+ * /System and /usr are bound read-only over /private/preboot/Cryptexes/OS/{System,usr}, not as unions, so a lookup there stays on the
+ * SystemOS volume and never meets the root's links again. The two mount points are owner Data directories under
+ * /private/var/ngpu/preboot, shown over the root's empty /private/preboot as a read-only union. Never fatal; stage and status go to the
+ * boot log: 1 mount points made, 2 preboot shown, 3 System bound, 4 usr bound, 5 an extension of WebKit visible through the path. */
+volatile int native_cryptex_os_stage = 0;
+volatile int native_cryptex_os_status = -1;
+static int
+native_cryptex_os_bind(proc_t p, user_addr_t scratch, const char *source, const char *point, int flags)
+{
+	struct mount_args request = {.type = scratch + 0xa00, .path = scratch + 0xa20, .flags = MNT_RDONLY | flags,
+	    .data = scratch + 0xb00};
+	int32_t result = 0;
+	int error;
+	if ((error = copyout("bindfs", request.type, 7)) || (error = copyout(point, request.path, strlen(point) + 1)) ||
+	    (error = copyout(source, request.data, strlen(source) + 1))) {
+		return error;
+	}
+	native_bindfs_boot_mount = 1;
+	error = mount(p, &request, &result);
+	native_bindfs_boot_mount = 0;
+	return error;
+}
+static void
+native_cryptex_os_view(proc_t p, user_addr_t scratch)
+{
+	static const char *const points[] = {"/private/var/ngpu/preboot/Cryptexes/OS/System/", "/private/var/ngpu/preboot/Cryptexes/OS/usr/"};
+	vnode_t probe = NULLVP;
+	int error = 0;
+	for (size_t i = 0; i < sizeof(points) / sizeof(points[0]) && !error; ++i) {
+		error = native_gpu_addon_parents(p, scratch, points[i]);
+	}
+	if (error) {
+		native_cryptex_os_status = error;
+		return;
+	}
+	native_cryptex_os_stage = 1;
+	if ((error = native_cryptex_os_bind(p, scratch, "/private/var/ngpu/preboot", "/private/preboot", MNT_UNION))) {
+		native_cryptex_os_status = error;
+		return;
+	}
+	native_cryptex_os_stage = 2;
+	if ((error = native_cryptex_os_bind(p, scratch, "/System", "/private/preboot/Cryptexes/OS/System", 0))) {
+		native_cryptex_os_status = error;
+		return;
+	}
+	native_cryptex_os_stage = 3;
+	if ((error = native_cryptex_os_bind(p, scratch, "/usr", "/private/preboot/Cryptexes/OS/usr", 0))) {
+		native_cryptex_os_status = error;
+		return;
+	}
+	native_cryptex_os_stage = 4;
+	error = vnode_lookup("/System/Cryptexes/OS/System/Library/ExtensionKit/Extensions/WebContentExtension.appex/Info.plist", 0, &probe,
+	    vfs_context_current());
+	if (!error) {
+		vnode_put(probe);
+		native_cryptex_os_stage = 5;
+	}
+	native_cryptex_os_status = error;
+}
+/* The device answers MobileGestalt cached while the display gamut was P3: removed so they are worked out again from the device tree
+ * (now sRGB). 0 removed, ENOENT none there (already regenerated or never made). */
+/* Invalidate derived caches by retaining their old contents next to them. */
+static int
+native_cache_preserve(proc_t p, user_addr_t scratch, const char *path)
+{
+    char saved[MAXPATHLEN];
+    snprintf(saved, sizeof(saved), "%s.unx15-saved", path);
+    struct renameatx_np_args request = {.fromfd = AT_FDCWD, .from = scratch + 0xc00,
+        .tofd = AT_FDCWD, .to = scratch + 0xe00, .flags = 4 /* RENAME_EXCL */};
+    int32_t result = 0;
+    int error = copyout(path, request.from, strlen(path) + 1);
+    if (!error) error = copyout(saved, request.to, strlen(saved) + 1);
+    return error ? error : renameatx_np(p, &request, &result);
+}
+volatile int native_gestalt_cache_status = -1;
+static void
+native_gestalt_cache_drop(proc_t p, user_addr_t scratch)
+{
+	static const char cache[] = "/private/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/"
+	    "com.apple.MobileGestalt.plist";
+	int error = native_cache_preserve(p, scratch, cache);
+	native_gestalt_cache_status = error;
+}
+/* LaunchServices' database of this Data store was built while /System/Cryptexes/OS led nowhere, so it never registered what lies behind
+ * it (WebKit's extensions among them) and lsd does not register system content again on a later boot of the same OS build. Its files
+ * are removed once, so lsd builds the database again with the path in place; the marker file keeps later boots from repeating it.
+ * Status for the boot log: files removed, or -2 done before, or -errno. */
+#include <sys/dirent.h>
+volatile int native_ls_store_status = -1;
+static void
+native_ls_store_drop(proc_t p, user_addr_t scratch)
+{
+	static const char marker[] = "/private/var/ngpu/ls-store-rebuilt-1";
+	static const char caches[] = "/private/var/mobile/Containers/Data/InternalDaemon/5C583048-0C53-456F-B110-BB12068B787F/Library/Caches";
+	static const char prefix[] = "com.apple.LaunchServices-";
+	vfs_context_t ctx = vfs_context_current();
+	vnode_t vp = NULLVP;
+	if (!vnode_lookup(marker, 0, &vp, ctx)) {
+		vnode_put(vp);
+		native_ls_store_status = -2;
+		return;
+	}
+	int error = vnode_lookup(caches, 0, &vp, ctx);
+	if (error) {
+		native_ls_store_status = -error;
+		return;
+	}
+	char names[8][64];
+	unsigned found = 0;
+	char *buffer = kalloc_data(4096, Z_WAITOK);
+	uio_t uio = buffer ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
+	int eof = 0;
+	while (uio && !eof && found < 8) {
+		uio_reset(uio, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
+		uio_addiov(uio, CAST_USER_ADDR_T(buffer), 4096);
+		int entries = 0;
+		if ((error = VNOP_READDIR(vp, uio, 0, &eof, &entries, ctx))) {
+			break;
+		}
+		const size_t used = 4096 - (size_t)uio_resid(uio);
+		if (!used) {
+			break;
+		}
+		for (size_t at = 0; at + sizeof(struct dirent) - sizeof(((struct dirent *)0)->d_name) <= used && found < 8;) {
+			const struct dirent *entry = (const struct dirent *)(buffer + at);
+			if (!entry->d_reclen) {
+				break;
+			}
+			if (entry->d_namlen < sizeof(names[0]) && !strncmp(entry->d_name, prefix, sizeof(prefix) - 1)) {
+				memcpy(names[found], entry->d_name, entry->d_namlen);
+				names[found++][entry->d_namlen] = 0;
+			}
+			at += entry->d_reclen;
+		}
+	}
+	if (uio) {
+		uio_free(uio);
+	}
+	if (buffer) {
+		kfree_data(buffer, 4096);
+	}
+	vnode_put(vp);
+	if (error) {
+		native_ls_store_status = -error;
+		return;
+	}
+	int removed = 0;
+	char path[192];
+	for (unsigned i = 0; i < found; ++i) {
+		snprintf(path, sizeof(path), "%s/%s", caches, names[i]);
+		if (!native_cache_preserve(p, scratch, path)) {
+			removed++;
+		}
+	}
+	native_gpu_addon_install(p, scratch);
 	static const char extensions_source[] = "/private/var/ngpu/addons", extensions_point[] = "/System/Library/Extensions";
 	static const char daemons_source[] = "/private/var/ngpu/daemons", daemons_point[] = "/System/Library/LaunchDaemons";
 	native_gpu_addon_mount(p, scratch, 0x400, extensions_source, sizeof(extensions_source), extensions_point,
@@ -7279,7 +7662,21 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
 	native_gpu_addon_mount(p, scratch, 0x600, daemons_source, sizeof(daemons_source), daemons_point, sizeof(daemons_point),
 	    "/System/Library/LaunchDaemons/com.apple.backboardd.plist",
 	    "/System/Library/LaunchDaemons/org.blu-sharky.adrenoprobed.plist", &native_gpu_addon2_stage, &native_gpu_addon2_status);
+	/* The default iPadOS 17 wallpaper's layered animation with PNG images in place of its HEIC ones (no hardware HEVC decoder here).
+	 * The overlay carries the animation's documents and the PNG images; the sealed assets directory stays visible below it. */
+	static const char wallpaper_source[] = "/private/var/ngpu/wallpaper",
+	    wallpaper_point[] = "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/"
+	    "7570.iPadOS_17_Flat-1024w-1366h@2x~ipad.wallpaper/7570.iPadOS_17_Flat_Background-1024w-1366h@2x~ipad.ca";
+	native_gpu_addon_mount(p, scratch, 0x800, wallpaper_source, sizeof(wallpaper_source), wallpaper_point, sizeof(wallpaper_point),
+	    "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17_Flat-1024w-1366h@2x~ipad.wallpaper/"
+	    "7570.iPadOS_17_Flat_Background-1024w-1366h@2x~ipad.ca/assets/J120.HEIC",
+	    "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17_Flat-1024w-1366h@2x~ipad.wallpaper/"
+	    "7570.iPadOS_17_Flat_Background-1024w-1366h@2x~ipad.ca/J120.png", &native_gpu_addon3_stage, &native_gpu_addon3_status);
+	native_cryptex_os_view(p, scratch);
+	native_gestalt_cache_drop(p, scratch);
+	native_ls_store_drop(p, scratch);
 }
+
 
 static int
 native_owner_data_prepare(proc_t p, user_addr_t scratch)

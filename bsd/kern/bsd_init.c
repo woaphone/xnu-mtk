@@ -548,12 +548,14 @@ native_mobile_graphics_load_probe(void)
 	}
 	native_mobile_graphics_load_status = OSKextLoadKextWithIdentifier("com.apple.iokit.IOMobileGraphicsFamily");
 	native_mobile_graphics_probe_checkpoint();
+#if defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
 	int legacy_register = 0;
 	if (native_mobile_graphics_load_status == 0 &&
 	    PE_parse_boot_argn("offline-legacy-register", &legacy_register, sizeof(legacy_register)) && legacy_register) {
 		extern void native_legacy_display_probe(void);
 		native_legacy_display_probe();
 	}
+#endif
 	int client_probe = 0;
 	if (native_mobile_graphics_load_status == 0 &&
 	    PE_parse_boot_argn("offline-mobile-graphics-client", &client_probe, sizeof(client_probe)) && client_probe) {

@@ -4103,6 +4103,7 @@ is_io_registry_entry_get_property_bin(
 }
 
 
+static bool native_sandbox_grant(IOService * service);
 /* Routine io_registry_entry_set_properties */
 kern_return_t
 is_io_registry_entry_set_properties
@@ -4138,7 +4139,10 @@ is_io_registry_entry_set_properties
 			res = kIOReturnBadArgument;
 		}
 #if CONFIG_MACF
-		else if (0 != mac_iokit_check_set_properties(kauth_cred_get(),
+		/* A service's grant (native_sandbox_grant) stands in for the sandbox's verdict on setting its properties as well: backboardd's
+		 * profile refuses FadePeriod, which CoreBrightness sends with every brightness, on the panel backlight (int-276). */
+		else if (!(OSDynamicCast(IOService, entry) && native_sandbox_grant(OSDynamicCast(IOService, entry)))
+		    && 0 != mac_iokit_check_set_properties(kauth_cred_get(),
 		    registry_entry, obj)) {
 			res = kIOReturnNotPermitted;
 		}
