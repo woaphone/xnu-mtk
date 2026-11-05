@@ -7652,6 +7652,12 @@ native_ls_store_drop(proc_t p, user_addr_t scratch)
 			removed++;
 		}
 	}
+	(void)native_gpu_addon_write(marker, (const uint8_t *)"1\n", 2, 0644, ctx);
+	native_ls_store_status = removed;
+}
+static void
+native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+{
 	native_gpu_addon_install(p, scratch);
 	static const char extensions_source[] = "/private/var/ngpu/addons", extensions_point[] = "/System/Library/Extensions";
 	static const char daemons_source[] = "/private/var/ngpu/daemons", daemons_point[] = "/System/Library/LaunchDaemons";
