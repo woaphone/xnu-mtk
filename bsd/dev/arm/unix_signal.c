@@ -270,6 +270,46 @@ struct user_sigframe32 {
 	mcontext32_t            mctx;
 };
 
+/* Default fatal signals never call sendsig(). Keep the real terminating
+ * thread state in the existing console/Log path before coredump/exit. */
+void
+k70u_fatal_signal(int sig)
+{
+#if defined(__arm64__)
+	struct proc *p = current_proc();
+	static unsigned fatal_logs;
+	if ((sig != SIGABRT && sig != SIGTRAP && sig != SIGSEGV) ||
+	    !proc_is64bit_data(p) || fatal_logs >= 24) {
+		return;
+	}
+	arm_thread_state64_t state;
+	mach_msg_type_number_t count = ARM_THREAD_STATE64_COUNT;
+	if (thread_getstatus(current_thread(), ARM_THREAD_STATE64,
+	    (thread_state_t)&state, &count) != KERN_SUCCESS) {
+		return;
+	}
+	fatal_logs++;
+	printf("K70U-FATAL7: n=%u pid=%d name=%.20s sig=%d pc=%llx lr=%llx fp=%llx sp=%llx\n",
+	    fatal_logs, proc_getpid(p), p->p_comm, sig,
+	    (unsigned long long)state.pc, (unsigned long long)state.lr,
+	    (unsigned long long)state.fp, (unsigned long long)state.sp);
+	uint64_t fp = state.fp;
+	for (int i = 0; i < 8 && fp > 0x10000ULL && fp < 0x800000000000ULL; i++) {
+		uint64_t frame[2];
+		if (copyin((user_addr_t)fp, frame, sizeof(frame)) != 0) {
+			break;
+		}
+		printf("K70U-FATAL7: frame=%d ra=%llx\n", i, (unsigned long long)frame[1]);
+		if (frame[0] <= fp) {
+			break;
+		}
+		fp = frame[0];
+	}
+#else
+	(void)sig;
+#endif
+}
+
 /*
  * Send an interrupt to process.
  *

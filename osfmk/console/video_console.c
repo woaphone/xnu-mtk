@@ -1280,6 +1280,7 @@ static volatile uint32_t k70u_display_dirty;
 static volatile int k70u_display_state;      /* 0 not started, 1 running, -1 refused */
 static uint32_t k70u_display_ms = 1000;
 static uint64_t k70u_display_pushes;
+static uint64_t k70u_display_presents;
 static uint64_t k70u_display_hb_last;
 volatile uint32_t k70u_display_busy;
 
@@ -1390,6 +1391,7 @@ k70u_display_push(void)
 	if (!__sync_bool_compare_and_swap(&k70u_display_busy, 0, 1)) {
 		return;
 	}
+	k70u_display_dirty = 0;
 	__asm__ volatile ("dsb sy" ::: "memory");
 	for (uint32_t row = 0; row < K70U_FB_HEIGHT; row++) {
 		const volatile uint64_t *src = (const volatile uint64_t *)(k70u_fb_l0 + (uint64_t)row * K70U_FB_L0_ROW);
@@ -1414,8 +1416,7 @@ k70u_display_push(void)
 static void
 k70u_display_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
-	if (k70u_display_dirty) {
-		k70u_display_dirty = 0;
+	if (k70u_display_dirty && (!yunluo_video_console_frozen || k70u_display_presents)) {
 		k70u_display_push();
 	}
 	uint64_t now = mach_absolute_time();
@@ -1434,6 +1435,21 @@ k70u_display_tick(__unused thread_call_param_t p0, __unused thread_call_param_t 
 	uint64_t deadline = 0;
 	clock_interval_to_deadline(k70u_display_ms, NSEC_PER_MSEC, &deadline);
 	thread_call_enter_delayed(&k70u_display_call, deadline);
+}
+
+/* The compositor has finished writing L0. Publish L1 and trigger the CMD
+ * panel now, even though the text console has been frozen by scanout. */
+void
+k70u_display_present(void)
+{
+	k70u_display_presents++;
+	k70u_display_dirty = 1;
+	k70u_display_push();
+	if (k70u_display_presents == 1) {
+		printf("K70U-DISPLAY7: compositor present=%llu pushes=%llu\n",
+		    (unsigned long long)k70u_display_presents,
+		    (unsigned long long)k70u_display_pushes);
+	}
 }
 
 void

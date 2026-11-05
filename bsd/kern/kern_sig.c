@@ -150,6 +150,7 @@ int killpg1(proc_t, int, int, int, int);
 kern_return_t do_bsdexception(int, int, int);
 void __posix_sem_syscall_return(kern_return_t);
 char *proc_name_address(void *p);
+void k70u_fatal_signal(int sig);
 
 static int      filt_sigattach(struct knote *kn, struct kevent_qos_s *kev);
 static void     filt_sigdetach(struct knote *kn);
@@ -3108,6 +3109,7 @@ postsig_locked(int signum)
 			p->p_sigacts.ps_sig = signum;
 			proc_signalend(p, 1);
 			proc_unlock(p);
+			k70u_fatal_signal(signum);
 			if (task_is_driver(proc_task(p))) {
 				coredump_flags |= COREDUMP_FULLFSYNC;
 			}
