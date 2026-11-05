@@ -14,6 +14,7 @@ void k70u_irq_state(const char *);
 void k70u_display_start(void);
 void k70u_health_start(void);
 void k70u_memory_snapshot(const char *);
+void k70u_launchd_sample(void);
 extern volatile uint64_t k70u_irq_count;
 #else
 #define k70u_pmsg(s) ((void)0)
@@ -25,6 +26,7 @@ extern volatile uint64_t k70u_irq_count;
 #define k70u_display_start() ((void)0)
 #define k70u_health_start() ((void)0)
 #define k70u_memory_snapshot(a) ((void)0)
+#define k70u_launchd_sample() ((void)0)
 #endif
 #ifdef __cplusplus
 }

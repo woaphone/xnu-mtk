@@ -1292,6 +1292,13 @@ static thread_call_data_t k70u_health_call;
 static uint64_t k70u_wdt3_pings;
 static uint64_t k70u_health_last;
 static int k70u_health_started;
+/* [k70u unx4] bounded feed: stop pinging after k70u-wdt-feed-s seconds so a
+ * stuck boot ends in a watchdog reset (keeps the pmsg RAM). 0 = feed forever. */
+static uint32_t k70u_wdt3_feed_s = 240;
+static uint64_t k70u_wdt3_stop_abs;
+static int k70u_wdt3_stopped;
+extern volatile uint32_t native_mtkufs_reads, native_mtkufs_block_requests, native_mtkufs_utp_errors;
+extern volatile int yunluo_exec_stage;
 
 void
 k70u_memory_snapshot(const char *stage)
@@ -1305,13 +1312,22 @@ k70u_memory_snapshot(const char *stage)
 	    vm_page_inactive_count, vm_page_speculative_count,
 	    vm_pageout_state.vm_memory_pressure,
 	    (unsigned long long)gPhysBase, (unsigned long long)gPhysSize);
-	k70u_pmsg(line);
+	printf("%s", line);
 }
 
 static void
 k70u_health_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
-	if (k70u_wdt3 && (k70u_wdt3[0] & 1U)) {
+	uint64_t now0 = mach_absolute_time();
+	if (!k70u_wdt3_stopped && k70u_wdt3_stop_abs && now0 >= k70u_wdt3_stop_abs) {
+		uint64_t sns = 0;
+		k70u_wdt3_stopped = 1;
+		absolutetime_to_nanoseconds(now0, &sns);
+		printf("K70U-WDT3: feeding stopped at t=%llus after %llu pings mode=0x%x length=0x%x status=0x%x; watchdog reset expected in about 50 s\n",
+		    (unsigned long long)(sns / NSEC_PER_SEC), (unsigned long long)k70u_wdt3_pings,
+		    k70u_wdt3 ? k70u_wdt3[0] : 0, k70u_wdt3 ? k70u_wdt3[1] : 0, k70u_wdt3 ? k70u_wdt3[3] : 0);
+	}
+	if (!k70u_wdt3_stopped && k70u_wdt3 && (k70u_wdt3[0] & 1U)) {
 		k70u_wdt3[2] = 0x1971U;
 		__asm__ volatile ("dsb sy" ::: "memory");
 		k70u_wdt3_pings++;
@@ -1322,12 +1338,18 @@ k70u_health_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		char line[192];
 		k70u_health_last = now;
 		absolutetime_to_nanoseconds(now, &ns);
-		snprintf(line, sizeof(line), "K70U-WDT3: t=%llus pings=%llu mode=0x%x length=0x%x status=0x%x irq=%llu\n",
+		snprintf(line, sizeof(line), "K70U-WDT3: t=%llus pings=%llu%s mode=0x%x length=0x%x status=0x%x irq=%llu push=%llu\n",
 		    (unsigned long long)(ns / NSEC_PER_SEC), (unsigned long long)k70u_wdt3_pings,
+		    k70u_wdt3_stopped ? " (stopped)" : "",
 		    k70u_wdt3 ? k70u_wdt3[0] : 0, k70u_wdt3 ? k70u_wdt3[1] : 0,
-		    k70u_wdt3 ? k70u_wdt3[3] : 0, (unsigned long long)k70u_irq_count);
-		k70u_pmsg(line);
+		    k70u_wdt3 ? k70u_wdt3[3] : 0, (unsigned long long)k70u_irq_count,
+		    (unsigned long long)k70u_display_pushes);
+		printf("%s", line);
+		printf("K70U-UFS4: reads=%u breq=%u utp-errs=%u exec-stage=%d\n",
+		    native_mtkufs_reads, native_mtkufs_block_requests, native_mtkufs_utp_errors,
+		    yunluo_exec_stage);
 		k70u_memory_snapshot("tick");
+		k70u_launchd_sample();
 	}
 	uint64_t deadline = 0;
 	clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);
@@ -1345,7 +1367,14 @@ k70u_health_start(void)
 	    (unsigned long long)K70U_WDT3_PHYS, k70u_wdt3 != NULL,
 	    k70u_wdt3 ? k70u_wdt3[0] : 0, k70u_wdt3 ? k70u_wdt3[1] : 0,
 	    k70u_wdt3 ? k70u_wdt3[3] : 0);
-	k70u_pmsg(line);
+	printf("%s", line);
+	PE_parse_boot_argn("k70u-wdt-feed-s", &k70u_wdt3_feed_s, sizeof(k70u_wdt3_feed_s));
+	if (k70u_wdt3_feed_s != 0) {
+		uint64_t span = 0;
+		nanoseconds_to_absolutetime((uint64_t)k70u_wdt3_feed_s * NSEC_PER_SEC, &span);
+		k70u_wdt3_stop_abs = mach_absolute_time() + span;
+	}
+	printf("K70U-WDT3: feeding for %us (0 = forever), then the watchdog resets the board\n", k70u_wdt3_feed_s);
 	k70u_memory_snapshot("health-start");
 	thread_call_setup(&k70u_health_call, k70u_health_tick, NULL);
 	k70u_health_last = mach_absolute_time();

@@ -630,6 +630,165 @@ is_platform_error(uint32_t esr)
 	return fault_code == FSC_SYNC_PARITY;
 }
 
+/* [k70u unx4] EL0 exception accounting + launchd thread sampler. */
+#include <kern/processor.h>
+#include <kern/recount.h>
+
+static volatile uint64_t k70u_el0_class[64];
+static volatile uint64_t k70u_pid1_svc;
+static volatile uint64_t k70u_pid1_abort;
+static volatile uint64_t k70u_pid1_other;
+static volatile int64_t  k70u_pid1_last_svc;
+static volatile uint32_t k70u_pid1_last_esr;
+static volatile uint64_t k70u_pid1_last_far;
+static volatile uint64_t k70u_pid1_last_pc;
+
+static inline void
+k70u_el0_note(arm_saved_state_t *state, esr_exception_class_t class, uint32_t esr, vm_offset_t far)
+{
+	k70u_el0_class[class & 63]++;
+	if (task_pid(current_task()) != 1) {
+		return;
+	}
+	if (class == ESR_EC_SVC_64) {
+		k70u_pid1_svc++;
+		k70u_pid1_last_svc = (int64_t)get_saved_state_reg(state, 16);
+		return;
+	}
+	if (class == ESR_EC_DABORT_EL0 || class == ESR_EC_IABORT_EL0) {
+		k70u_pid1_abort++;
+	} else {
+		k70u_pid1_other++;
+	}
+	k70u_pid1_last_esr = esr;
+	k70u_pid1_last_far = far;
+	k70u_pid1_last_pc = get_saved_state_pc(state);
+}
+
+#define K70U_SAMPLE_THREADS 6
+#define K70U_SAMPLE_FRAMES  8
+struct k70u_thread_sample {
+	uint64_t tid, wait_event, cont, cpu_ms, upc, ulr, usp, ux16, ufar;
+	uint32_t uesr;
+	int      state, hint, pri, stackless;
+	uint64_t frames[K70U_SAMPLE_FRAMES];
+	int      nframes;
+};
+
+void
+k70u_launchd_sample(void)
+{
+	static struct k70u_thread_sample s[K70U_SAMPLE_THREADS];
+	char line[384];
+	int n = 0, total = 0, len = 0;
+	task_t t1 = TASK_NULL;
+
+	for (int c = 0; c < 64; c++) {
+		if (k70u_el0_class[c] && len < (int)sizeof(line) - 24) {
+			len += snprintf(line + len, sizeof(line) - len, " %02x:%llu", c,
+			    (unsigned long long)k70u_el0_class[c]);
+		}
+	}
+	printf("K70U-EL0: classes%s\n", len ? line : " none");
+	printf("K70U-P1: svc=%llu abort=%llu other=%llu last-svc=%lld last-esr=0x%x last-far=0x%llx last-pc=0x%llx\n",
+	    (unsigned long long)k70u_pid1_svc, (unsigned long long)k70u_pid1_abort,
+	    (unsigned long long)k70u_pid1_other, (long long)k70u_pid1_last_svc,
+	    k70u_pid1_last_esr, (unsigned long long)k70u_pid1_last_far,
+	    (unsigned long long)k70u_pid1_last_pc);
+
+	if (!lck_mtx_try_lock(&tasks_threads_lock)) {
+		printf("K70U-P1: tasks_threads_lock busy\n");
+		return;
+	}
+	task_t task;
+	queue_iterate(&tasks, task, task_t, tasks) {
+		if (task_pid(task) == 1) {
+			t1 = task;
+			task_reference(t1);
+			break;
+		}
+	}
+	lck_mtx_unlock(&tasks_threads_lock);
+	if (t1 == TASK_NULL) {
+		printf("K70U-P1: no pid 1 task\n");
+		return;
+	}
+	if (!task_lock_try(t1)) {
+		printf("K70U-P1: pid 1 task lock busy\n");
+		task_deallocate(t1);
+		return;
+	}
+	thread_t th;
+	queue_iterate(&t1->threads, th, thread_t, task_threads) {
+		total++;
+		if (n >= K70U_SAMPLE_THREADS) {
+			continue;
+		}
+		struct k70u_thread_sample *p = &s[n++];
+		bzero(p, sizeof(*p));
+		p->tid = thread_tid(th);
+		p->state = th->state;
+		p->hint = (int)th->block_hint;
+		p->pri = th->sched_pri;
+		p->wait_event = (uint64_t)VM_KERNEL_UNSLIDE(th->wait_event);
+		p->cont = (uint64_t)VM_KERNEL_UNSLIDE(th->continuation);
+		uint64_t ns = 0;
+		absolutetime_to_nanoseconds(recount_thread_time_mach(th), &ns);
+		p->cpu_ms = ns / NSEC_PER_MSEC;
+		arm_saved_state_t *u = th->machine.upcb;
+		if (u != NULL && is_saved_state64(u)) {
+			p->upc = get_saved_state_pc(u);
+			p->ulr = get_saved_state_lr(u);
+			p->usp = get_saved_state_sp(u);
+			p->ux16 = get_saved_state_reg(u, 16);
+			p->uesr = saved_state64(u)->esr;
+			p->ufar = saved_state64(u)->far;
+		}
+		if (th == current_thread() || th->kernel_stack == 0) {
+			p->stackless = (th->kernel_stack == 0);
+			continue;
+		}
+		vm_offset_t lo = th->kernel_stack, hi = lo + kernel_stack_size;
+		arm_kernel_saved_state_t *ks = &thread_get_kernel_state(th)->machine.ss;
+		uint64_t fp = ks->fp;
+		p->frames[p->nframes++] = (uint64_t)VM_KERNEL_UNSLIDE(ks->lr);
+		while (p->nframes < K70U_SAMPLE_FRAMES && fp >= lo && fp + 16 <= hi && !(fp & 7)) {
+			const uint64_t *f = (const uint64_t *)fp;
+			if (f[1] == 0) {
+				break;
+			}
+			p->frames[p->nframes++] = (uint64_t)VM_KERNEL_UNSLIDE(f[1]);
+			if (f[0] <= fp) {
+				break;
+			}
+			fp = f[0];
+		}
+	}
+	task_unlock(t1);
+	task_deallocate(t1);
+
+	printf("K70U-P1: threads=%d sampled=%d\n", total, n);
+	for (int i = 0; i < n; i++) {
+		struct k70u_thread_sample *p = &s[i];
+		printf("K70U-P1T: tid=%llu st=0x%x hint=0x%x pri=%d ev=0x%llx cont=0x%llx cpu=%llums "
+		    "upc=0x%llx ulr=0x%llx usp=0x%llx x16=%lld esr=0x%x far=0x%llx%s\n",
+		    (unsigned long long)p->tid, p->state, p->hint, p->pri,
+		    (unsigned long long)p->wait_event, (unsigned long long)p->cont,
+		    (unsigned long long)p->cpu_ms, (unsigned long long)p->upc,
+		    (unsigned long long)p->ulr, (unsigned long long)p->usp,
+		    (long long)p->ux16, p->uesr, (unsigned long long)p->ufar,
+		    p->stackless ? " stackless" : "");
+		if (p->nframes) {
+			len = 0;
+			for (int f = 0; f < p->nframes; f++) {
+				len += snprintf(line + len, sizeof(line) - len, " 0x%llx",
+				    (unsigned long long)p->frames[f]);
+			}
+			printf("K70U-P1K: tid=%llu%s\n", (unsigned long long)p->tid, line);
+		}
+	}
+}
+
 void
 sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far, __unused bool did_initiate_panic_lockdown)
 {
@@ -667,6 +826,9 @@ sleh_synchronous(arm_context_t *context, uint32_t esr, vm_offset_t far, __unused
 	}
 #endif
 	bool is_user = PSR64_IS_USER(get_saved_state_cpsr(state));
+	if (is_user) {
+		k70u_el0_note(state, class, esr, far);
+	}
 
 #if CONFIG_SPTM
 	// Lockdown should only be initiated for kernel exceptions
