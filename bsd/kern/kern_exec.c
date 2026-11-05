@@ -8244,6 +8244,10 @@ yunluo_data_prepare(proc_t p, user_addr_t scratch)
 {
 	static const char * const dirs[] = {
 		"/private/var/Library", "/private/var/Library/Preferences",
+		/* /Library/Managed Preferences/mobile is the sealed root's symlink
+		 * to this Data path. PLCoreStorage watches the directory even when
+		 * no managed powerlog preferences are installed. */
+		"/private/var/Managed Preferences", "/private/var/Managed Preferences/mobile",
 		"/private/var/log", "/private/var/log/com.apple.xpc.launchd",
 		"/private/var/keybags", "/private/var/vm",
 		"/private/var/run", "/private/var/tmp", "/private/var/mobile",
