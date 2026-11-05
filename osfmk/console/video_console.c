@@ -1350,7 +1350,8 @@ k70u_health_tick(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		    native_mtkufs_reads, native_mtkufs_block_requests, native_mtkufs_utp_errors,
 		    yunluo_exec_stage);
 		k70u_memory_snapshot("tick");
-		k70u_launchd_sample();
+		/* The unx4 remote-stack sampler was for the single-core launchd stall.
+		 * A task lock does not pin another CPU's kernel stack. */
 	}
 	uint64_t deadline = 0;
 	clock_interval_to_deadline(1, NSEC_PER_SEC, &deadline);

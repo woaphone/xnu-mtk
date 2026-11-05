@@ -8819,6 +8819,8 @@ process_signature(proc_t p, struct image_params *imgp)
 	 * approve of exec, kill and return immediately.
 	 */
 	if (imgp->ip_mac_return != 0) {
+		printf("K70U-EXEC9: MAC refused pid=%d name=%s errno=%d image-csflags=0x%x proc-csflags=0x%x\n",
+		    proc_getpid(p), p->p_name, imgp->ip_mac_return, imgp->ip_csflags, proc_getcsflags(p));
 		boot_progress_process_stage(proc_getpid(p),p->p_name,"exec MAC policy REFUSED");
 		KERNEL_DEBUG_CONSTANT(BSDDBG_CODE(DBG_BSD_PROC, BSD_PROC_EXITREASON_CREATE) | DBG_FUNC_NONE,
 		    proc_getpid(p), OS_REASON_EXEC, EXEC_EXIT_REASON_SECURITY_POLICY, 0, 0);

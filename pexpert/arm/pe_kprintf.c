@@ -95,6 +95,29 @@ _kprintf(const char *format, ...)
 
 static int      cpu_last_locked = 0;
 
+extern int vprintf(const char *, va_list);
+extern int __doprnt(const char *, va_list, void (*)(int, void *), void *, int, int);
+extern void yunluo_log_append(const char *, int);
+
+/* A video console must not scroll MMIO while its caller holds a kernel lock
+ * or has IRQs disabled. Those messages still reach the existing RAM log;
+ * ordinary thread output uses the same buffered path as printf. */
+struct k70u_kprintf_record {
+	char text[256];
+	int used;
+};
+
+static void
+k70u_kprintf_record_putc(int ch, void *arg)
+{
+	struct k70u_kprintf_record *record = arg;
+	record->text[record->used++] = (char)ch;
+	if (ch == '\n' || record->used == sizeof(record->text)) {
+		yunluo_log_append(record->text, record->used);
+		record->used = 0;
+	}
+}
+
 __attribute__((noinline, not_tail_called))
 void
 kprintf(const char *fmt, ...)
@@ -103,6 +126,26 @@ kprintf(const char *fmt, ...)
 	va_list         listp2;
 	boolean_t       state;
 	void           *caller = __builtin_return_address(0);
+
+	if (!disable_serial_output && !disable_kprintf_output &&
+	    PE_kputc == console_write_unbuffered) {
+		va_start(listp, fmt);
+		if (oslog_is_safe()) {
+			vprintf(fmt, listp);
+		} else {
+			struct k70u_kprintf_record record = { .used = 0 };
+			va_copy(listp2, listp);
+			__doprnt(fmt, listp, k70u_kprintf_record_putc, &record, 16, TRUE);
+			if (record.used) yunluo_log_append(record.text, record.used);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+			os_log_with_args(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, fmt, listp2, caller);
+#pragma clang diagnostic pop
+			va_end(listp2);
+		}
+		va_end(listp);
+		return;
+	}
 
 	if (!disable_serial_output && !disable_kprintf_output) {
 		va_start(listp, fmt);

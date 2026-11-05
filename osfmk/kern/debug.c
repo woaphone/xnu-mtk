@@ -1018,34 +1018,33 @@ register_additional_panic_data_buffer(const char *producer_name, void *buf, int 
  * according to the device's boot-args.
  */
 #undef panic
+extern int vsnprintf(char *, size_t, const char *, va_list);
+static void
+k70u_record_panic(const char *format, va_list args, void *caller)
+{
+	char text[1024];
+	va_list copy;
+	int prefix = snprintf(text, sizeof(text), "K70U-PANIC9: cpu=%d caller=%p ", cpu_number(), caller);
+	va_copy(copy, args);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wformat-nonliteral"
+	vsnprintf(text + prefix, sizeof(text) - prefix - 1, format, copy);
+#pragma clang diagnostic pop
+	va_end(copy);
+	text[sizeof(text) - 2] = '\0';
+	size_t length = strlen(text);
+	text[length++] = '\n';
+	text[length] = '\0';
+	k70u_pmsg(text);
+	/* pmsg is retained RAM. Do not acquire the UFS I/O lock from panic. */
+}
+
 void
 panic(const char *str, ...)
 {
-	k70u_trace("PANIC format", str);
 	va_list panic_str_args;
-
-	/* yunluo: an OOM panic dies inside the paniclog builder before the later
-	 * flush hook runs (expdbxnu17: text never reached the ring, no marker).
-	 * Put the raw string into the console ring and flush to expdb here,
-	 * before any paniclog allocation.  Weak: images without the driver skip. */
-	{
-		extern void yunluo_log_append(const char *c, int size) __attribute__((weak_import));
-		extern void yunluo_panic_flush(void) __attribute__((weak_import));
-		if (yunluo_log_append != NULL && str != NULL) {
-			int panic_len = 0;
-			while (panic_len < 256 && str[panic_len] != '\0') {
-				panic_len++;
-			}
-			yunluo_log_append("panic-entry: ", 14);
-			yunluo_log_append(str, panic_len);
-			yunluo_log_append("\n", 1);
-			if (yunluo_panic_flush != NULL) {
-				yunluo_panic_flush();
-			}
-		}
-	}
-
 	va_start(panic_str_args, str);
+	k70u_record_panic(str, panic_str_args, __builtin_return_address(0));
 	panic_trap_to_debugger(str, &panic_str_args, 0, NULL, 0, NULL, (unsigned long)(char *)__builtin_return_address(0));
 	va_end(panic_str_args);
 }
@@ -1065,10 +1064,10 @@ panic_with_data(uuid_t uuid, void *addr, uint32_t len, const char *str, ...)
 void
 panic_with_options(unsigned int reason, void *ctx, uint64_t debugger_options_mask, const char *str, ...)
 {
-	k70u_trace("PANIC_OPTIONS format", str);
 	va_list panic_str_args;
 
 	va_start(panic_str_args, str);
+	k70u_record_panic(str, panic_str_args, __builtin_return_address(0));
 	panic_trap_to_debugger(str, &panic_str_args, reason, ctx, (debugger_options_mask & ~DEBUGGER_INTERNAL_OPTIONS_MASK),
 	    NULL, (unsigned long)(char *)__builtin_return_address(0));
 	va_end(panic_str_args);
@@ -1393,17 +1392,8 @@ debugger_collect_diagnostics(unsigned int exception, unsigned int code, unsigned
 		}
 		paniclog_append_noflush("\n");
 
-		/*
-		 * yunluo: the panic text above went through consdebug_putc, so it is
-		 * already in the console ring that the expdb log writer drains.  The
-		 * writer only runs every two seconds and the other CPUs are halted by
-		 * now, so without this the one message that matters would never reach
-		 * the medium.  Weak: images without the driver simply skip it.
-		 */
-		extern void yunluo_panic_flush(void) __attribute__((weak_import));
-		if (yunluo_panic_flush) {
-			yunluo_panic_flush();
-		}
+		/* The entry already preserved the formatted panic in pmsg RAM.
+		 * Other CPUs may be halted while holding the UFS lock. */
 	}
 #if defined(__x86_64__)
 	else if (((debugger_current_op == DBOP_DEBUGGER) && debugger_is_panic)) {
