@@ -1364,10 +1364,12 @@ k70u_display_start(void)
 		vm_offset_t va = ml_io_map(k70u_mutex_bank_phys[bank], PAGE_SIZE);
 		k70u_mutex_en[bank] = va ? (volatile uint32_t *)(va + 0x20) : NULL;
 	}
-	k70u_fb_l0 = (volatile uint8_t *)ml_io_map_wcomb(K70U_FB_L0_PHYS,
-	    round_page((vm_size_t)K70U_FB_L0_ROW * K70U_FB_HEIGHT));
-	k70u_fb_l1 = (volatile uint8_t *)ml_io_map_wcomb(K70U_FB_L1_PHYS,
-	    round_page((vm_size_t)K70U_FB_L1_ROW * K70U_FB_HEIGHT));
+	/* kernel_map (KMA_DATA) like the console's own mapping: the io_submap is
+	 * too small for 13 MB and its KMA_NOFAIL allocation panicked in unx1. */
+	k70u_fb_l0 = (volatile uint8_t *)ml_io_map_unmappable(K70U_FB_L0_PHYS,
+	    round_page((vm_size_t)K70U_FB_L0_ROW * K70U_FB_HEIGHT), VM_WIMG_WCOMB);
+	k70u_fb_l1 = (volatile uint8_t *)ml_io_map_unmappable(K70U_FB_L1_PHYS,
+	    round_page((vm_size_t)K70U_FB_L1_ROW * K70U_FB_HEIGHT), VM_WIMG_WCOMB);
 	if (!k70u_dsi_start || !k70u_mutex_en[0] || !k70u_mutex_en[1] || !k70u_mutex_en[2] ||
 	    !k70u_fb_l0 || !k70u_fb_l1) {
 		k70u_display_state = -1;
