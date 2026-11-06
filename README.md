@@ -1,58 +1,113 @@
 # xnu-mtk
 
-Apple XNU 内核在 MediaTek 平台上的离线移植。
+MediaTek ARM64 平台的通用 XNU 移植与构建仓库。
 
-基于 **`xnu-10063.141.1`**（Darwin 23.6.0，上游提交
+本仓库只保存 **XNU 内核源码层面的通用能力和机型分支**。板级资源、驱动
+archive、ADT、payload、boot image 与刷机产物由对应的 UniXNU 设备仓库维护。
+
+当前基线为 **`xnu-10063.141.1`**（Darwin 23.6.0，上游提交
 [`d8b80295`](https://github.com/apple-oss-distributions/xnu/commit/d8b80295118ef25ac3a784134bcf95cd8e88109f)）。
+
+## 仓库定位
+
+- `main` 是未经机型修改的 Apple 基线，也是所有设备 branch 的 diff 基准。
+- 每个机型使用一个稳定 branch，不在仓库根目录堆放任何机型的固定参数。
+- 可跨设备复用的 MTK 改动可以回流 `main`，或在内容足够稳定后单独建立
+  `mtk-common` branch。
+- 当前尚未把已有设备 branch 中真正通用的部分完整抽象到 `mtk-common`；
+  README 不会把所有机型改动冒充成通用实现。
 
 ## 分支
 
-| 分支 | 内容 | 设备 |
+| Branch | 用途 | 状态 |
 | --- | --- | --- |
-| `main` | Apple 原版快照，未改动 | — |
-| `yunluo` | 板级移植 | Redmi Pad（MT6789） |
-| `rothko` | 板级移植，进行中 | Redmi K70 Ultra（MT6989） |
+| `main` | Apple XNU 基线、通用说明和构建入口 | 干净基线 |
+| `yunluo` | Redmi Pad / MT6789 参考移植 | 已有参考分支 |
+| `rothko` | Redmi K70 Ultra / MT6989 稳定移植 | 代码 head `fd4edc7` |
 
-`main` 是干净的 diff 基准，两个设备分支都从它派生：
+构建器应选择明确的设备 branch。固定的机型参数不应提交到 `main`。
 
 ```bash
-git diff main..yunluo     # 看 MT6789 移植到底改了什么
+git clone --branch rothko git@github.com:woaphone/xnu-mtk.git xnu-work
+git diff main..rothko
 ```
 
-## 仓库边界
+## 通用与 per-device
 
-**有**：XNU 内核侧的板级改动（161 文件 / +14653 −341）。
+| 内容 | 归属 |
+| --- | --- |
+| Apple XNU 上游导入、编译兼容层、通用 MMU/GIC/timer 接口 | 本仓库 |
+| 跨多个 MTK SoC 可复用的内核修复 | 本仓库；稳定后推进 `mtk-common` |
+| 单一机型的 XNU 改动、调试 checkpoint、兼容 quirk | 设备 branch |
+| SoC/板级 DTS、ADT 资源、内核命令行和固定地址 | UniXNU 设备仓库 |
+| UFS、显示、HID、AES 等驱动源码和 archive 构建 | UniXNU 设备仓库 |
+| UEFI、DarwinBoot、GOP、ramdisk/FAT 和固件交接 | UEFI 仓库 |
+| payload、kernelcache、boot/init_boot/vendor_boot | 设备打包流程生成，不入库 |
 
-**没有**：UFS、显示、输入驱动 —— 它们在 UniXNU 侧的 `drivers/` 里，
-以 archive 形式在链接时用 `-force_load` 并入内核。
+因此本仓库不是独立 bootloader，也不是可单独刷入的完整发行包。完整构建链路是：
 
-所以单靠本仓库编不出可启动的内核，需要配套的 UniXNU 树。
+```text
+xnu-mtk[device branch]
+        +
+UniXNU-rothko[drivers + patches + package]
+        +
+Silicium-Rothko[UEFI FD]
+        ↓
+kernel → prelink → payload → boot images
+```
 
-## 编译
+## 相关仓库
 
-XNU 官方只支持 macOS，但在 Linux 上可以编 —— 需要一整套 BSD 工具替身
-（`sysctl` / `sw_vers` / `xcrun` / `ditto`）和假 macOS SDK。
-这套流程打包成了 skill `xnu-linux-build`。
+| 仓库 | 职责 |
+| --- | --- |
+| [`woaphone/xnu-mtk`](https://github.com/woaphone/xnu-mtk) | XNU 源码和机型 branch |
+| [`woaphone/UniXNU-rothko`](https://github.com/woaphone/UniXNU-rothko) | K70U 板级、驱动、ADT、18-patch series 和打包流程 |
+| [`ChallengeThePeak/Silicium-Rothko`](https://github.com/ChallengeThePeak/Silicium-Rothko) | K70U UEFI、DarwinBoot 和 firmware handoff |
 
-三个前提：
+设备仓库中的 `patches/xnu/series` 是从对应 XNU branch 生成的可复现快照；
+它不能替代本仓库的源码历史。
 
-1. **先编驱动 archive，再编内核** —— 内核源码引用了驱动符号（如 `yunluo_panic_flush`），反过来驱动也读内核导出的 `yunluo_preboot_status`，两边 `-D` 宏必须成对
-2. **`XNU_SKIP_PATCH_LOOP=1`** —— 所有改动都是手改源码，补丁循环已废弃（多个补丁改同一批文件，正反向 check 同时失败）
-3. 验收看 `file <kernel>` 里有没有 **`NOUNDEFS`**，没有就是链接没干净
+## 构建
 
-## 移植差异（MT6789 → MT6989）
+推荐使用对应设备仓库的官方流程，因为内核链接依赖设备仓库中的 archive、
+ADT、payload 和 OS profile。
 
-| 项 | MT6789 | MT6989 |
-| --- | --- | --- |
-| UFSHCI 基址 | `0x11270000` | `0x112b0000` |
-| UFSHCI 窗口 | `0x2300` | `0x2a00` |
-| UFS 版本 | 2.2（HS-G2） | 4.0（HS-G4/G5） |
-| UFS PHY | — | `0x112a0000`，`mphy-ver=1` |
-| `/psci method` | SMC | SMC |
-| LK DT 里的 CPU | 多核 | 只有 `/cpu@0` |
-| GIC 节点名 | — | `interrupt-controller@c400000`（不叫 `gic`） |
+```bash
+git clone git@github.com:woaphone/UniXNU-rothko.git
+git clone --recursive git@github.com:ChallengeThePeak/Silicium-Rothko.git uefi-rothko
+```
 
-改动细节见 `rothko` 分支的提交说明。
+通用前置条件是：
+
+1. 选择设备仓库声明的 XNU branch；
+2. 先构建板级驱动 archive，再链接内核；
+3. 使用设备仓库相同的 config、宏和 patch series；
+4. 预链接、payload 和 boot image 都必须来自同一源码修订；
+5. 链接结果的符号、kernelcache 哈希和最终 payload 必须能互相追溯。
+
+XNU 官方构建面向 macOS。Linux 构建依赖已有的 BSD 工具替身、假 macOS SDK
+和兼容工具链；具体命令以设备仓库和所使用 OS profile 为准。不要把某一机型
+使用过的 Clang 兼容方案描述成所有 MTK 设备的通用方案。
+
+## 验证边界
+
+`rothko` branch 已有实机证据覆盖早期 XNU 入口、MMU/serial、八核、timer/IPI、
+UFS HS-G5 双 lane、root matching 和激活页面到达。以下仍未闭环：
+
+- UI 触控交互、按键唤醒和长期显示稳定性；
+- CPU 动态调频与“系统卡顿”的最终归因；
+- Wi-Fi、蓝牙、蜂窝、音频和电量服务；
+- UEFI/BROM 事故的完整根因及 UFS 命令/DMA 硬件闭环。
+
+仓库中的 branch 与 commit 只表示源码状态，不自动把上述项目标成已验证。
+
+## 分支维护规则
+
+- `main` 保持可比较：不提交机型地址、设备 quirk 和调试常量；
+- 设备 branch 可以包含 per-device 修改，但 commit message 必须写清影响的硬件；
+- 通用修复先在对应设备 branch 验证，再评估回流 `main` 或 `mtk-common`；
+- 禁止 force-push 已发布稳定 branch；
+- 不提交构建产物、kernelcache、pstore、payload 或私钥。
 
 ## License
 
